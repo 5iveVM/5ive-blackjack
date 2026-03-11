@@ -1,0 +1,14 @@
+{
+  "accounts": {},
+  "tests": {
+    "test_move_validation": {
+      "parameters": [
+        5,
+        3
+      ],
+      "expected": {
+        "success": true
+      }
+    }
+  }
+}

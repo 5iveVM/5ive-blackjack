@@ -1,0 +1,26 @@
+{
+  "name": "5ive-blackjack",
+  "version": "0.1.0",
+  "description": "A 5IVE VM project",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "build": "5ive build",
+    "test": "5ive test",
+    "deploy": "5ive deploy",
+    "build:release": "5ive build -O 3",
+    "build:debug": "5ive build --debug",
+    "watch": "5ive build --watch",
+    "client:build": "npm --prefix client install && npm --prefix client run build",
+    "client:run": "npm --prefix client install && npm --prefix client run run"
+  },
+  "devDependencies": {
+    "@5ive-tech/cli": "^1.0.0"
+  },
+  "keywords": [
+    "five-vm",
+    "blockchain",
+    "solana",
+    "smart-contracts"
+  ]
+}

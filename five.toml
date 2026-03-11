@@ -1,0 +1,33 @@
+# 5IVE VM Project Configuration
+schema_version = 1
+
+[project]
+name = "5ive-blackjack"
+version = "0.1.0"
+description = "A 5IVE VM project"
+source_dir = "src"
+build_dir = "build"
+entry_point = "src/main.v"
+target = "vm"
+
+[optimizations]
+enable_compression = true
+enable_constraint_optimization = true
+optimization_level = "production"
+
+[dependencies]
+std = { package = "@5ive/std", version = "0.1.0", source = "bundled", link = "inline" }
+# Cargo-style alias dependencies:
+# local_math = { package = "math-lib", source = "path", path = "../math-lib", link = "inline" }
+# amm = { package = "@5ive/amm", source = "namespace", namespace = "@5ive/amm", link = "external" }
+# oracle = { package = "@acme/oracle", source = "address", address = "SCRIPT_ACCOUNT_BASE58", link = "external" }
+
+[build]
+# Custom build settings
+max_bytecode_size = 1048576  # 1MB
+target_compute_units = 200000
+
+[deploy]
+# Deployment settings
+network = "devnet"
+# program_id = "your-program-id"
