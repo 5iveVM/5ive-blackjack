@@ -1,14 +1,36 @@
 {
-  "accounts": {},
+  "accounts": {
+    "table_account": {
+      "owner": "system",
+      "lamports": 1000000,
+      "data_len": 256,
+      "is_writable": true
+    },
+    "player_account": {
+      "owner": "system",
+      "lamports": 1000000,
+      "data_len": 256,
+      "is_writable": true
+    },
+    "round_account": {
+      "owner": "system",
+      "lamports": 1000000,
+      "data_len": 256,
+      "is_writable": true
+    }
+  },
   "tests": {
-    "test_move_validation": {
-      "parameters": [
-        5,
-        3
-      ],
-      "expected": {
-        "success": true
-      }
+    "test_init_player_chips": {
+      "parameters": [500],
+      "expected": { "success": true }
+    },
+    "test_hit_progresses_hand": {
+      "parameters": [12, 7],
+      "expected": { "success": true }
+    },
+    "test_win_updates_chips": {
+      "parameters": [500, 25],
+      "expected": { "success": true }
     }
   }
 }

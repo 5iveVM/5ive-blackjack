@@ -1,25 +1,38 @@
-# Node Client Starter
+# 5ive Blackjack Client
 
-This client is designed for on-chain execution on devnet/mainnet using `FiveProgram` + ABI from `../build/main.five`.
+On-chain runner for the blackjack MVP flow:
 
-## Quickstart
+1. `init_table`
+2. `init_player`
+3. `start_round`
+4. optional `hit`
+5. `stand_and_settle`
+6. getter calls (`get_player_chips`, `get_round_status`, `get_last_outcome`)
+
+## Run
 
 ```bash
-# From project root
+# from project root
 npm run build
-cd client
-npm install
-npm run run
+npm run client:run:local
+npm run client:test:localnet
+npm run client:test:journey:localnet
+npm run client:journey:localnet
+npm run client:gui:localnet
 ```
 
-The starter is self-contained:
-1. Uses a default devnet RPC URL in code.
-2. Creates `client/script-account.json` on first run.
-3. Uses `~/.config/solana/id.json` if available, otherwise creates `client/payer.json`.
+## Required setup
 
-## Notes
+- Set real table/player/round account pubkeys in `client/main.ts` `ACCOUNT_OVERRIDES`.
+- Set script account with `FIVE_SCRIPT_ACCOUNT` or `deployment-config.<network>.json`.
 
-1. `client/main.ts` demonstrates instruction building for your starter contract.
-2. It sends and confirms on-chain transactions, then prints signature, `meta.err`, and CU.
-3. For account-required functions, set account mappings directly in `ACCOUNT_OVERRIDES` in `client/main.ts`.
-4. Expand this file as your contract grows; keep it aligned with `tests/main.test.v`.
+## GUI (Localnet)
+
+`npm run client:gui:localnet` starts a local server at `http://127.0.0.1:4177`.
+
+It auto-deploys script bytecode (unless `FIVE_SCRIPT_ACCOUNT` is set), provisions fresh on-chain table/player/round accounts, and lets you play rounds (`init`, `start`, `hit`, `stand`) from the browser.
+
+Prereqs for journey/GUI:
+- local validator running at `http://127.0.0.1:8899`
+- Five VM program deployed on that validator (or set `FIVE_VM_PROGRAM_ID` to the deployed address)
+- payer key available at `~/.config/solana/id.json` (or `SOLANA_KEYPAIR_PATH`)

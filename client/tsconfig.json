@@ -9,6 +9,10 @@
     "outDir": "dist"
   },
   "include": [
-    "main.ts"
+    "main.ts",
+    "journey.localnet.ts",
+    "gui-server.ts",
+    "src/**/*.ts",
+    "tests/**/*.ts"
   ]
 }

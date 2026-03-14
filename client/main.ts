@@ -1,199 +1,296 @@
-import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { readFile, readdir } from 'fs/promises';
 import { homedir } from 'os';
+import { join } from 'path';
 import {
   Connection,
   Keypair,
   PublicKey,
   Transaction,
   TransactionInstruction,
-  sendAndConfirmTransaction
+  type ConfirmOptions,
 } from '@solana/web3.js';
 import { FiveProgram, FiveSDK } from '@5ive-tech/sdk';
 
-type AbiParameter = {
+type StepResult = {
   name: string;
-  is_account?: boolean;
-  param_type?: string;
-  type?: string;
+  signature: string | null;
+  computeUnits: number | null;
+  ok: boolean;
+  err: string | null;
 };
 
-const RPC_URL = process.env.FIVE_RPC_URL;
-const FIVE_VM_PROGRAM_ID = process.env.FIVE_VM_PROGRAM_ID;
-const SCRIPT_ACCOUNT_ENV = process.env.FIVE_SCRIPT_ACCOUNT;
-const SCRIPT_ACCOUNT_FILE = join(process.cwd(), 'script-account.json');
-const FALLBACK_PAYER_FILE = join(process.cwd(), 'payer.json');
+const NETWORK = process.env.FIVE_NETWORK || 'localnet';
+const NORMALIZED_NETWORK = NETWORK === 'local' ? 'localnet' : NETWORK;
+const RPC_BY_NETWORK: Record<string, string> = {
+  localnet: 'http://127.0.0.1:8899',
+  devnet: 'https://api.devnet.solana.com',
+  mainnet: 'https://api.mainnet-beta.solana.com',
+};
+const PROGRAM_BY_NETWORK: Record<string, string> = {
+  localnet: '5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst',
+  devnet: '5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst',
+  mainnet: '5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst',
+};
+const CONFIRM: ConfirmOptions = {
+  commitment: 'confirmed',
+  preflightCommitment: 'confirmed',
+  skipPreflight: false,
+};
+
+const BET = Number(process.env.FIVE_BET || '25');
+const SEED = Number(process.env.FIVE_SEED || '1337');
+const INITIAL_CHIPS = Number(process.env.FIVE_INITIAL_CHIPS || '500');
+const MIN_BET = Number(process.env.FIVE_MIN_BET || '10');
+const MAX_BET = Number(process.env.FIVE_MAX_BET || '100');
+const DEALER_SOFT17_HITS = process.env.FIVE_DEALER_SOFT17_HITS === '1';
+const DO_HIT = process.env.FIVE_DO_HIT !== '0';
+
 const ACCOUNT_OVERRIDES: Record<string, Record<string, string>> = {
-  // TODO: Provide real account addresses before running this client.
-  // init_counter: {
-  //   counter: 'REAL_COUNTER_PUBKEY',
-  //   authority: 'REAL_AUTHORITY_PUBKEY'
-  // }
+  init_table: {
+    table: '<TABLE_ACCOUNT_PUBKEY>',
+  },
+  init_player: {
+    player: '<PLAYER_ACCOUNT_PUBKEY>',
+  },
+  start_round: {
+    table: '<TABLE_ACCOUNT_PUBKEY>',
+    player: '<PLAYER_ACCOUNT_PUBKEY>',
+    round: '<ROUND_ACCOUNT_PUBKEY>',
+  },
+  hit: {
+    player: '<PLAYER_ACCOUNT_PUBKEY>',
+    round: '<ROUND_ACCOUNT_PUBKEY>',
+  },
+  stand_and_settle: {
+    table: '<TABLE_ACCOUNT_PUBKEY>',
+    player: '<PLAYER_ACCOUNT_PUBKEY>',
+    round: '<ROUND_ACCOUNT_PUBKEY>',
+  },
+  get_player_chips: {
+    player: '<PLAYER_ACCOUNT_PUBKEY>',
+  },
+  get_round_status: {
+    player: '<PLAYER_ACCOUNT_PUBKEY>',
+  },
+  get_last_outcome: {
+    player: '<PLAYER_ACCOUNT_PUBKEY>',
+  },
 };
 
-function normalizePath(path: string): string {
-  if (path.startsWith('~/')) {
-    return join(homedir(), path.slice(2));
+function parseConsumedUnits(logs: string[] | null | undefined): number | null {
+  if (!logs) return null;
+  for (const line of logs) {
+    const m = line.match(/consumed (\d+) of/);
+    if (m) return Number(m[1]);
   }
-  return path;
+  return null;
+}
+
+async function loadDeploymentConfig(network: string): Promise<{
+  rpcUrl?: string;
+  fiveProgramId?: string;
+  blackjackScriptAccount?: string;
+}> {
+  const path = join(process.cwd(), '..', `deployment-config.${network}.json`);
+  try {
+    const raw = await readFile(path, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      rpcUrl?: string;
+      fiveProgramId?: string;
+      blackjackScriptAccount?: string;
+    };
+    return parsed;
+  } catch {
+    return {};
+  }
 }
 
 async function loadPayer(): Promise<Keypair> {
-  const defaultPath = normalizePath('~/.config/solana/id.json');
-  try {
-    const secret = JSON.parse(await readFile(defaultPath, 'utf8')) as number[];
-    return Keypair.fromSecretKey(new Uint8Array(secret));
-  } catch {
-    try {
-      const secret = JSON.parse(await readFile(FALLBACK_PAYER_FILE, 'utf8')) as number[];
-      return Keypair.fromSecretKey(new Uint8Array(secret));
-    } catch {
-      const generated = Keypair.generate();
-      const { writeFile } = await import('fs/promises');
-      await writeFile(FALLBACK_PAYER_FILE, JSON.stringify(Array.from(generated.secretKey), null, 2) + '\n');
-      return generated;
-    }
-  }
+  const path = process.env.SOLANA_KEYPAIR_PATH || join(homedir(), '.config/solana/id.json');
+  const secret = JSON.parse(await readFile(path, 'utf8')) as number[];
+  return Keypair.fromSecretKey(new Uint8Array(secret));
 }
 
-function requireEnv(name: string, value: string | undefined): string {
-  if (!value) {
+function ensureAccountMap(functionName: string, payer: Keypair): Record<string, string> {
+  const map = { ...(ACCOUNT_OVERRIDES[functionName] || {}) };
+  const fnMissing = Object.values(map).some((v) => v.includes('<'));
+  if (fnMissing) {
     throw new Error(
-      `Missing required environment variable: ${name}. Set it before running this scaffold.`
+      `Missing ACCOUNT_OVERRIDES for ${functionName}. Update client/main.ts with real table/player/round pubkeys.`
     );
   }
-  return value;
+  map.owner = payer.publicKey.toBase58();
+  return map;
 }
 
-async function loadScriptAccount(): Promise<string> {
-  if (SCRIPT_ACCOUNT_ENV) return SCRIPT_ACCOUNT_ENV;
+async function sendIx(
+  connection: Connection,
+  payer: Keypair,
+  encoded: any,
+  name: string
+): Promise<StepResult> {
+  const tx = new Transaction().add(
+    new TransactionInstruction({
+      programId: new PublicKey(encoded.programId),
+      keys: encoded.keys.map((k: any) => ({
+        pubkey: new PublicKey(k.pubkey),
+        isSigner: k.isSigner,
+        isWritable: k.isWritable,
+      })),
+      data: Buffer.from(encoded.data, 'base64'),
+    })
+  );
+
   try {
-    const saved = JSON.parse(await readFile(SCRIPT_ACCOUNT_FILE, 'utf8')) as { pubkey?: string };
-    if (saved.pubkey) return saved.pubkey;
-  } catch {
-    // fall through to explicit error below
+    const signature = await connection.sendTransaction(tx, [payer], CONFIRM);
+    const latest = await connection.getLatestBlockhash('confirmed');
+    await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+    const txMeta = await connection.getTransaction(signature, {
+      commitment: 'confirmed',
+      maxSupportedTransactionVersion: 0,
+    });
+    const metaErr = txMeta?.meta?.err ?? null;
+    const cu = txMeta?.meta?.computeUnitsConsumed ?? parseConsumedUnits(txMeta?.meta?.logMessages);
+    return {
+      name,
+      signature,
+      computeUnits: cu,
+      ok: metaErr == null,
+      err: metaErr == null ? null : JSON.stringify(metaErr),
+    };
+  } catch (err) {
+    return {
+      name,
+      signature: null,
+      computeUnits: null,
+      ok: false,
+      err: err instanceof Error ? err.message : String(err),
+    };
   }
-  throw new Error(
-    'Missing script account. Set FIVE_SCRIPT_ACCOUNT or provide script-account.json with an existing pubkey.'
-  );
 }
 
-function getAccountOverrides(functionName: string): Record<string, string> {
-  return ACCOUNT_OVERRIDES[functionName] || ACCOUNT_OVERRIDES['*'] || {};
+async function callFunction(
+  connection: Connection,
+  payer: Keypair,
+  program: any,
+  functionName: string,
+  args: Record<string, any>
+): Promise<StepResult> {
+  let builder = program.function(functionName).accounts(ensureAccountMap(functionName, payer));
+  if (Object.keys(args).length > 0) builder = builder.args(args);
+  const encoded = await builder.instruction();
+  return sendIx(connection, payer, encoded, functionName);
 }
 
-function parseComputeUnitsFromLogs(logs: string[] | null | undefined): number | undefined {
-  if (!logs) return undefined;
-  for (const line of logs) {
-    const match = line.match(/consumed\s+(\d+)\s+of/i);
-    if (match) return Number(match[1]);
-  }
-  return undefined;
-}
-
-function defaultValueForType(typeName: string | undefined): any {
-  const normalized = (typeName || 'unknown').toLowerCase();
-  throw new Error(
-    `No safe default for parameter type "${normalized}". Update the generated client to provide real args.`
-  );
+function printStep(step: StepResult): void {
+  console.log('---');
+  console.log('step:', step.name);
+  console.log('signature:', step.signature ?? 'n/a');
+  console.log('meta.err:', step.err ?? 'null');
+  console.log('compute_units:', step.computeUnits ?? 'n/a');
 }
 
 async function run(): Promise<void> {
-  const artifactPath = join(process.cwd(), '..', 'build', 'main.five');
-  const artifactText = await readFile(artifactPath, 'utf8');
-  const { abi } = await FiveSDK.loadFiveFile(artifactText);
+  const deploymentConfig = await loadDeploymentConfig(NORMALIZED_NETWORK);
+  const rpcUrl =
+    process.env.FIVE_RPC_URL ||
+    deploymentConfig.rpcUrl ||
+    RPC_BY_NETWORK[NORMALIZED_NETWORK] ||
+    RPC_BY_NETWORK.localnet;
+  const fiveProgramId =
+    process.env.FIVE_VM_PROGRAM_ID ||
+    deploymentConfig.fiveProgramId ||
+    PROGRAM_BY_NETWORK[NORMALIZED_NETWORK] ||
+    PROGRAM_BY_NETWORK.localnet;
 
-  const rpcUrl = requireEnv('FIVE_RPC_URL', RPC_URL);
-  const fiveVmProgramId = requireEnv('FIVE_VM_PROGRAM_ID', FIVE_VM_PROGRAM_ID);
+  const scriptAccount =
+    process.env.FIVE_SCRIPT_ACCOUNT || deploymentConfig.blackjackScriptAccount || '';
+
+  if (!scriptAccount || scriptAccount.includes('<')) {
+    throw new Error(
+      'Missing blackjack script account. Set FIVE_SCRIPT_ACCOUNT or deployment-config.<network>.json blackjackScriptAccount.'
+    );
+  }
+
   const connection = new Connection(rpcUrl, 'confirmed');
   const payer = await loadPayer();
-  const scriptAccount = await loadScriptAccount();
-  const program = FiveProgram.fromABI(scriptAccount, abi, {
-    fiveVMProgramId
+
+  const artifactPath = await resolveArtifactPath();
+  const artifactText = await readFile(artifactPath, 'utf8');
+  const loaded = await FiveSDK.loadFiveFile(artifactText);
+  const program = FiveProgram.fromABI(scriptAccount, loaded.abi, {
+    fiveVMProgramId: fiveProgramId,
   });
 
-  const preferred = ["move_player","level_up"] as string[];
-  const available = program.getFunctions();
-  const targets = preferred.filter((name) => available.includes(name));
-  if (targets.length === 0 && available.length > 0) {
-    targets.push(available[0]);
+  console.log('[blackjack-client] network:', NORMALIZED_NETWORK);
+  console.log('[blackjack-client] rpc:', rpcUrl);
+  console.log('[blackjack-client] payer:', payer.publicKey.toBase58());
+  console.log('[blackjack-client] script_account:', scriptAccount);
+  console.log('[blackjack-client] five_vm_program_id:', fiveProgramId);
+
+  const steps: StepResult[] = [];
+
+  steps.push(
+    await callFunction(connection, payer, program, 'init_table', {
+      min_bet: MIN_BET,
+      max_bet: MAX_BET,
+      dealer_soft17_hits: DEALER_SOFT17_HITS,
+    })
+  );
+
+  steps.push(
+    await callFunction(connection, payer, program, 'init_player', {
+      initial_chips: INITIAL_CHIPS,
+    })
+  );
+
+  steps.push(
+    await callFunction(connection, payer, program, 'start_round', {
+      bet: BET,
+      seed: SEED,
+    })
+  );
+
+  if (DO_HIT) {
+    steps.push(await callFunction(connection, payer, program, 'hit', {}));
   }
 
-  if (targets.length === 0) {
-    throw new Error('No functions found in ABI. Run npm run build first.');
+  steps.push(await callFunction(connection, payer, program, 'stand_and_settle', {}));
+
+  // Getter calls still execute as on-chain instructions; we surface tx evidence.
+  steps.push(await callFunction(connection, payer, program, 'get_player_chips', {}));
+  steps.push(await callFunction(connection, payer, program, 'get_round_status', {}));
+  steps.push(await callFunction(connection, payer, program, 'get_last_outcome', {}));
+
+  let failed = false;
+  for (const step of steps) {
+    printStep(step);
+    if (!step.ok) failed = true;
   }
 
-  console.log('[client] Loaded ABI from ../build/main.five');
-  console.log('[client] RPC:', rpcUrl);
-  console.log('[client] Payer:', payer.publicKey.toBase58());
-  console.log('[client] Script account:', scriptAccount);
-  console.log('[client] Five VM program id:', program.getFiveVMProgramId());
-  console.log('[client] Mode: on-chain');
-  console.log('[client] Target functions:', targets.join(', '));
+  if (failed) {
+    throw new Error('one or more client steps failed');
+  }
+}
 
-  for (const functionName of targets) {
-    const functionDef: any = program.getFunction(functionName);
-    const params: AbiParameter[] = functionDef?.parameters || [];
-    const accountArgs: Record<string, string> = getAccountOverrides(functionName);
-    const dataArgs: Record<string, any> = {};
+async function resolveArtifactPath(): Promise<string> {
+  const buildDir = join(process.cwd(), '..', 'build');
+  const mainPath = join(buildDir, 'main.five');
 
-    for (const param of params) {
-      if (param.is_account && !accountArgs[param.name]) {
-        const attributes = (param as any).attributes || [];
-        if (Array.isArray(attributes) && attributes.includes('signer')) {
-          accountArgs[param.name] = payer.publicKey.toBase58();
-        } else {
-          throw new Error(
-            `Missing required account override for "${functionName}.${param.name}". Provide a real pubkey in ACCOUNT_OVERRIDES.`
-          );
-        }
-      } else {
-        dataArgs[param.name] = defaultValueForType(param.param_type || param.type);
-      }
+  try {
+    await readFile(mainPath, 'utf8');
+    return mainPath;
+  } catch {
+    const entries = await readdir(buildDir);
+    const firstFive = entries.find((name) => name.endsWith('.five'));
+    if (!firstFive) {
+      throw new Error(`No .five artifact found in ${buildDir}. Run npm run build from project root.`);
     }
-
-    let builder = program.function(functionName);
-    if (Object.keys(accountArgs).length > 0) {
-      builder = builder.accounts(accountArgs);
-    }
-    if (Object.keys(dataArgs).length > 0) {
-      builder = builder.args(dataArgs);
-    }
-
-    const instruction = await builder.instruction();
-    console.log('\n[client] function:', functionName);
-    console.log('[client] instruction bytes:', Buffer.from(instruction.data, 'base64').length);
-    console.log('[client] account metas:', instruction.keys.length);
-
-    const txIx = new TransactionInstruction({
-      programId: new PublicKey(instruction.programId),
-      keys: instruction.keys.map((k) => ({
-        pubkey: new PublicKey(k.pubkey),
-        isSigner: k.isSigner,
-        isWritable: k.isWritable
-      })),
-      data: Buffer.from(instruction.data, 'base64')
-    });
-    const tx = new Transaction().add(txIx);
-    const signature = await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' });
-    const txDetails = await connection.getTransaction(signature, {
-      commitment: 'confirmed',
-      maxSupportedTransactionVersion: 0
-    });
-    const metaErr = txDetails?.meta?.err ?? null;
-    const computeUnits =
-      txDetails?.meta?.computeUnitsConsumed ?? parseComputeUnitsFromLogs(txDetails?.meta?.logMessages);
-
-    console.log('[client] signature:', signature);
-    console.log('[client] meta.err:', metaErr);
-    console.log('[client] compute units:', computeUnits ?? 'n/a');
-    if (metaErr !== null) {
-      throw new Error('on-chain execution failed');
-    }
+    return join(buildDir, firstFive);
   }
 }
 
 run().catch((error) => {
-  console.error('[client] failed:', error instanceof Error ? error.message : String(error));
+  console.error('[blackjack-client] failed:', error instanceof Error ? error.message : String(error));
   process.exit(1);
 });

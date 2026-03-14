@@ -1,18 +1,37 @@
 {
   "name": "5ive-blackjack",
   "version": "0.1.0",
-  "description": "A 5IVE VM project",
+  "description": "Single-player blackjack on 5IVE VM (mock chips MVP)",
   "author": "",
   "license": "MIT",
   "scripts": {
-    "build": "5ive build",
-    "test": "5ive test",
-    "deploy": "5ive deploy",
-    "build:release": "5ive build -O 3",
-    "build:debug": "5ive build --debug",
-    "watch": "5ive build --watch",
+    "build": "node ../five-cli/dist/index.js build --project .",
+    "test": "node ../five-cli/dist/index.js test",
+    "test:onchain:local": "node scripts/run-onchain.mjs localnet",
+    "test:onchain:devnet": "node scripts/run-onchain.mjs devnet",
+    "test:onchain:mainnet": "node scripts/run-onchain.mjs mainnet",
+    "test:onchain:mainnet:preflight": "node ../five-cli/dist/index.js test --on-chain --target mainnet",
+    "deploy:local": "node ../five-cli/dist/index.js deploy build/*.five --project . --target local",
+    "deploy:devnet": "node ../five-cli/dist/index.js deploy build/*.five --project . --target devnet",
+    "deploy:mainnet": "node ../five-cli/dist/index.js deploy build/*.five --project . --target mainnet",
+    "deploy": "node ../five-cli/dist/index.js deploy build/*.five --project .",
+    "build:release": "node ../five-cli/dist/index.js compile src/**/*.v -O 3",
+    "build:debug": "node ../five-cli/dist/index.js compile src/**/*.v --debug",
+    "watch": "node ../five-cli/dist/index.js compile src/**/*.v --watch",
     "client:build": "npm --prefix client install && npm --prefix client run build",
-    "client:run": "npm --prefix client install && npm --prefix client run run"
+    "client:run": "npm --prefix client install && npm --prefix client run run",
+    "client:test:localnet": "npm run build && npm --prefix client install && npm --prefix client run test:localnet",
+    "client:test:journey:localnet": "npm run build && npm --prefix client install && npm --prefix client run test:journey:localnet",
+    "client:journey:localnet": "npm run build && npm --prefix client install && npm --prefix client run journey:localnet",
+    "client:gui:localnet": "npm run build && npm --prefix client install && npm --prefix client run gui:localnet",
+    "dev:localnet:blackjack": "bash scripts/dev-localnet-blackjack.sh",
+    "client:run:local": "FIVE_NETWORK=localnet npm run client:run",
+    "client:run:devnet": "FIVE_NETWORK=devnet npm run client:run",
+    "client:run:mainnet": "FIVE_NETWORK=mainnet npm run client:run",
+    "verify": "npm run build && npm run test && npm run test:onchain:local && npm run client:run:local",
+    "verify:networks": "npm run build && npm run test && npm run test:onchain:local && npm run test:onchain:devnet && npm run test:onchain:mainnet:preflight",
+    "smoke": "npm run build && npm run test",
+    "smoke:onchain:local": "npm run build && npm run test:onchain:local"
   },
   "devDependencies": {
     "@5ive-tech/cli": "^1.0.0"
@@ -21,6 +40,7 @@
     "five-vm",
     "blockchain",
     "solana",
+    "blackjack",
     "smart-contracts"
   ]
 }
