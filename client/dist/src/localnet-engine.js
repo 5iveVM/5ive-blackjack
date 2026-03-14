@@ -1,0 +1,481 @@
+import { readFile, readdir } from 'fs/promises';
+import { homedir } from 'os';
+import { join } from 'path';
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, } from '@solana/web3.js';
+import { FiveProgram, FiveSDK } from '@5ive-tech/sdk';
+const ROUND_IDLE = 0;
+const ROUND_ACTIVE = 1;
+const ROUND_PLAYER_BUST = 2;
+const ROUND_DEALER_BUST = 3;
+const ROUND_PLAYER_WIN = 4;
+const ROUND_DEALER_WIN = 5;
+const ROUND_PUSH = 6;
+const CONFIRM = {
+    commitment: 'confirmed',
+    preflightCommitment: 'confirmed',
+    skipPreflight: false,
+};
+function parseConsumedUnits(logs) {
+    if (!logs)
+        return null;
+    for (const line of logs) {
+        const m = line.match(/consumed (\d+) of/);
+        if (m)
+            return Number(m[1]);
+    }
+    return null;
+}
+async function resolveArtifactPath(projectRoot) {
+    const buildDir = join(projectRoot, 'build');
+    const mainPath = join(buildDir, 'main.five');
+    try {
+        await readFile(mainPath, 'utf8');
+        return mainPath;
+    }
+    catch {
+        const entries = await readdir(buildDir);
+        const firstFive = entries.find((name) => name.endsWith('.five'));
+        if (!firstFive) {
+            throw new Error(`No .five artifact found in ${buildDir}. Run npm run build from project root.`);
+        }
+        return join(buildDir, firstFive);
+    }
+}
+async function loadPayer() {
+    const path = process.env.SOLANA_KEYPAIR_PATH || join(homedir(), '.config/solana/id.json');
+    const secret = JSON.parse(await readFile(path, 'utf8'));
+    return Keypair.fromSecretKey(new Uint8Array(secret));
+}
+async function sendIx(connection, payer, encoded, extraSigners = [], name) {
+    const tx = new Transaction().add(new TransactionInstruction({
+        programId: new PublicKey(encoded.programId),
+        keys: encoded.keys.map((k) => ({
+            pubkey: new PublicKey(k.pubkey),
+            isSigner: k.isSigner,
+            isWritable: k.isWritable,
+        })),
+        data: Buffer.from(encoded.data, 'base64'),
+    }));
+    try {
+        const signature = await connection.sendTransaction(tx, [payer, ...extraSigners], CONFIRM);
+        const latest = await connection.getLatestBlockhash('confirmed');
+        await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+        const txMeta = await connection.getTransaction(signature, {
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+        });
+        const metaErr = txMeta?.meta?.err ?? null;
+        const cu = txMeta?.meta?.computeUnitsConsumed ?? parseConsumedUnits(txMeta?.meta?.logMessages);
+        return {
+            name,
+            signature,
+            computeUnits: cu,
+            ok: metaErr == null,
+            err: metaErr == null ? null : JSON.stringify(metaErr),
+        };
+    }
+    catch (err) {
+        return {
+            name,
+            signature: null,
+            computeUnits: null,
+            ok: false,
+            err: err instanceof Error ? err.message : String(err),
+        };
+    }
+}
+async function createOwnedAccount(connection, payer, account, owner, space) {
+    const lamports = await connection.getMinimumBalanceForRentExemption(space);
+    const tx = new Transaction().add(SystemProgram.createAccount({
+        fromPubkey: payer.publicKey,
+        newAccountPubkey: account.publicKey,
+        lamports,
+        space,
+        programId: owner,
+    }));
+    try {
+        const signature = await connection.sendTransaction(tx, [payer, account], CONFIRM);
+        const latest = await connection.getLatestBlockhash('confirmed');
+        await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+        return {
+            name: `setup:create_account:${account.publicKey.toBase58()}`,
+            signature,
+            computeUnits: null,
+            ok: true,
+            err: null,
+        };
+    }
+    catch (err) {
+        return {
+            name: `setup:create_account:${account.publicKey.toBase58()}`,
+            signature: null,
+            computeUnits: null,
+            ok: false,
+            err: err instanceof Error ? err.message : String(err),
+        };
+    }
+}
+async function deployScript(connection, payer, loaded, fiveVmProgramId) {
+    let result = await FiveSDK.deployToSolana(loaded.bytecode, connection, payer, {
+        fiveVMProgramId: fiveVmProgramId,
+    });
+    if (!result.success) {
+        result = await FiveSDK.deployLargeProgramToSolana(loaded.bytecode, connection, payer, {
+            fiveVMProgramId: fiveVmProgramId,
+        });
+    }
+    const scriptAccount = result.scriptAccount || result.programId;
+    if (!result.success || !scriptAccount) {
+        throw new Error(`deploy failed: ${result.error || 'unknown error'}`);
+    }
+    return {
+        scriptAccount,
+        signature: result.transactionId || null,
+        deploymentCost: result.deploymentCost || null,
+    };
+}
+function cardRank(seed, cursor, marker) {
+    const mixed = seed + cursor * 17 + marker * 31 + 7;
+    return (mixed % 13) + 1;
+}
+function cardValue(rank) {
+    if (rank === 1)
+        return 11;
+    if (rank >= 10)
+        return 10;
+    return rank;
+}
+function addCard(total, softAces, seed, cursor, marker) {
+    const rank = cardRank(seed, cursor, marker);
+    const value = cardValue(rank);
+    let nextTotal = total + value;
+    let nextSoftAces = softAces;
+    if (rank === 1)
+        nextSoftAces += 1;
+    while (nextTotal > 21 && nextSoftAces > 0) {
+        nextTotal -= 10;
+        nextSoftAces -= 1;
+    }
+    return {
+        total: nextTotal,
+        softAces: nextSoftAces,
+        cursor: cursor + 1,
+        rank,
+    };
+}
+function dealerShouldDraw(total, softAces, dealerSoft17Hits) {
+    if (total < 17)
+        return true;
+    if (dealerSoft17Hits && total === 17 && softAces > 0)
+        return true;
+    return false;
+}
+export class LocalnetBlackjackEngine {
+    projectRoot;
+    connection;
+    payer;
+    fiveVmProgramId;
+    scriptAccount;
+    program;
+    tableAccount;
+    playerAccount;
+    roundAccount;
+    setupSteps;
+    state;
+    constructor(args) {
+        this.projectRoot = args.projectRoot;
+        this.connection = args.connection;
+        this.payer = args.payer;
+        this.fiveVmProgramId = args.fiveVmProgramId;
+        this.scriptAccount = args.scriptAccount;
+        this.program = args.program;
+        this.tableAccount = args.tableAccount;
+        this.playerAccount = args.playerAccount;
+        this.roundAccount = args.roundAccount;
+        this.setupSteps = args.setupSteps;
+        this.state = {
+            table: { minBet: 0, maxBet: 0, dealerSoft17Hits: false, roundNonce: 0 },
+            player: {
+                chips: 0,
+                activeBet: 0,
+                handTotal: 0,
+                dealerTotal: 0,
+                roundStatus: ROUND_IDLE,
+                outcome: ROUND_IDLE,
+                inRound: false,
+            },
+            round: {
+                deckSeed: 0,
+                ownerMarker: 0,
+                drawCursor: 0,
+                playerCardCount: 0,
+                dealerCardCount: 0,
+                playerSoftAces: 0,
+                dealerSoftAces: 0,
+                playerStand: false,
+            },
+            hands: {
+                player: [],
+                dealer: [],
+                dealerReveal: false,
+            },
+        };
+    }
+    static async create(projectRoot) {
+        const artifactPath = await resolveArtifactPath(projectRoot);
+        const artifactText = await readFile(artifactPath, 'utf8');
+        const loaded = await FiveSDK.loadFiveFile(artifactText);
+        const rpcUrl = process.env.FIVE_RPC_URL || 'http://127.0.0.1:8899';
+        const fiveVmProgramId = process.env.FIVE_VM_PROGRAM_ID || '5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst';
+        const connection = new Connection(rpcUrl, 'confirmed');
+        const payer = await loadPayer();
+        await connection.getLatestBlockhash('confirmed');
+        const vmProgramPk = new PublicKey(fiveVmProgramId);
+        const vmProgramInfo = await connection.getAccountInfo(vmProgramPk, 'confirmed');
+        if (!vmProgramInfo) {
+            throw new Error(`Five VM program ${fiveVmProgramId} is not deployed on ${rpcUrl}. ` +
+                `Deploy/start Five VM on localnet or set FIVE_VM_PROGRAM_ID to a valid deployed program.`);
+        }
+        const existingScript = process.env.FIVE_SCRIPT_ACCOUNT || '';
+        const deploy = existingScript
+            ? { scriptAccount: existingScript }
+            : await deployScript(connection, payer, loaded, fiveVmProgramId);
+        const program = FiveProgram.fromABI(deploy.scriptAccount, loaded.abi, {
+            fiveVMProgramId: fiveVmProgramId,
+        });
+        const ownerProgram = vmProgramPk;
+        const tableAccount = Keypair.generate();
+        const playerAccount = Keypair.generate();
+        const roundAccount = Keypair.generate();
+        const setupSteps = [];
+        setupSteps.push(await createOwnedAccount(connection, payer, tableAccount, ownerProgram, 256));
+        setupSteps.push(await createOwnedAccount(connection, payer, playerAccount, ownerProgram, 256));
+        setupSteps.push(await createOwnedAccount(connection, payer, roundAccount, ownerProgram, 256));
+        const failed = setupSteps.find((s) => !s.ok);
+        if (failed) {
+            throw new Error(`failed setup account creation: ${failed.name}: ${failed.err || 'unknown error'}`);
+        }
+        return new LocalnetBlackjackEngine({
+            projectRoot,
+            connection,
+            payer,
+            fiveVmProgramId,
+            scriptAccount: deploy.scriptAccount,
+            program,
+            tableAccount,
+            playerAccount,
+            roundAccount,
+            setupSteps,
+        });
+    }
+    getState() {
+        return JSON.parse(JSON.stringify(this.state));
+    }
+    getAddresses() {
+        return {
+            payer: this.payer.publicKey.toBase58(),
+            scriptAccount: this.scriptAccount,
+            fiveVmProgramId: this.fiveVmProgramId,
+            table: this.tableAccount.publicKey.toBase58(),
+            player: this.playerAccount.publicKey.toBase58(),
+            round: this.roundAccount.publicKey.toBase58(),
+        };
+    }
+    accountsFor(functionName) {
+        const base = {
+            owner: this.payer.publicKey.toBase58(),
+            authority: this.payer.publicKey.toBase58(),
+            table: this.tableAccount.publicKey.toBase58(),
+            player: this.playerAccount.publicKey.toBase58(),
+            round: this.roundAccount.publicKey.toBase58(),
+        };
+        if (functionName === 'init_table')
+            return { table: base.table, authority: base.authority };
+        if (functionName === 'init_player')
+            return { player: base.player, owner: base.owner };
+        if (functionName === 'start_round') {
+            return { table: base.table, player: base.player, round: base.round, owner: base.owner };
+        }
+        if (functionName === 'hit')
+            return { player: base.player, round: base.round, owner: base.owner };
+        if (functionName === 'stand_and_settle') {
+            return { table: base.table, player: base.player, round: base.round, owner: base.owner };
+        }
+        if (functionName === 'get_player_chips')
+            return { player: base.player };
+        if (functionName === 'get_round_status')
+            return { player: base.player };
+        if (functionName === 'get_last_outcome')
+            return { player: base.player };
+        return {};
+    }
+    async call(functionName, args = {}) {
+        let builder = this.program
+            .function(functionName)
+            .payer(this.payer.publicKey.toBase58())
+            .accounts(this.accountsFor(functionName));
+        if (Object.keys(args).length > 0) {
+            builder = builder.args(args);
+        }
+        const ix = await builder.instruction();
+        return sendIx(this.connection, this.payer, ix, [], functionName);
+    }
+    async initGame(setup) {
+        const steps = [];
+        const initTable = await this.call('init_table', {
+            min_bet: setup.minBet,
+            max_bet: setup.maxBet,
+            dealer_soft17_hits: setup.dealerSoft17Hits,
+        });
+        steps.push(initTable);
+        const initPlayer = await this.call('init_player', {
+            initial_chips: setup.initialChips,
+        });
+        steps.push(initPlayer);
+        if (initTable.ok && initPlayer.ok) {
+            this.state.table.minBet = setup.minBet;
+            this.state.table.maxBet = setup.maxBet;
+            this.state.table.dealerSoft17Hits = setup.dealerSoft17Hits;
+            this.state.table.roundNonce = 0;
+            this.state.player.chips = setup.initialChips;
+            this.state.player.activeBet = 0;
+            this.state.player.handTotal = 0;
+            this.state.player.dealerTotal = 0;
+            this.state.player.roundStatus = ROUND_IDLE;
+            this.state.player.outcome = ROUND_IDLE;
+            this.state.player.inRound = false;
+            this.state.round.deckSeed = 0;
+            this.state.round.ownerMarker = 0;
+            this.state.round.drawCursor = 0;
+            this.state.round.playerCardCount = 0;
+            this.state.round.dealerCardCount = 0;
+            this.state.round.playerSoftAces = 0;
+            this.state.round.dealerSoftAces = 0;
+            this.state.round.playerStand = false;
+            this.state.hands.player = [];
+            this.state.hands.dealer = [];
+            this.state.hands.dealerReveal = false;
+        }
+        return steps;
+    }
+    async startRound(bet, seed) {
+        const step = await this.call('start_round', { bet, seed });
+        if (!step.ok)
+            return step;
+        this.state.table.roundNonce += 1;
+        this.state.round.deckSeed = seed;
+        this.state.round.ownerMarker = this.state.table.roundNonce + bet + (seed % 97);
+        this.state.round.drawCursor = 0;
+        this.state.round.playerCardCount = 0;
+        this.state.round.dealerCardCount = 0;
+        this.state.round.playerSoftAces = 0;
+        this.state.round.dealerSoftAces = 0;
+        this.state.round.playerStand = false;
+        this.state.hands.player = [];
+        this.state.hands.dealer = [];
+        this.state.hands.dealerReveal = false;
+        this.state.player.activeBet = bet;
+        this.state.player.handTotal = 0;
+        this.state.player.dealerTotal = 0;
+        let d = addCard(this.state.player.handTotal, this.state.round.playerSoftAces, this.state.round.deckSeed, this.state.round.drawCursor, this.state.round.ownerMarker);
+        this.state.player.handTotal = d.total;
+        this.state.round.playerSoftAces = d.softAces;
+        this.state.round.drawCursor = d.cursor;
+        this.state.round.playerCardCount += 1;
+        this.state.hands.player.push(d.rank);
+        d = addCard(this.state.player.dealerTotal, this.state.round.dealerSoftAces, this.state.round.deckSeed, this.state.round.drawCursor, this.state.round.ownerMarker);
+        this.state.player.dealerTotal = d.total;
+        this.state.round.dealerSoftAces = d.softAces;
+        this.state.round.drawCursor = d.cursor;
+        this.state.round.dealerCardCount += 1;
+        this.state.hands.dealer.push(d.rank);
+        d = addCard(this.state.player.handTotal, this.state.round.playerSoftAces, this.state.round.deckSeed, this.state.round.drawCursor, this.state.round.ownerMarker);
+        this.state.player.handTotal = d.total;
+        this.state.round.playerSoftAces = d.softAces;
+        this.state.round.drawCursor = d.cursor;
+        this.state.round.playerCardCount += 1;
+        this.state.hands.player.push(d.rank);
+        d = addCard(this.state.player.dealerTotal, this.state.round.dealerSoftAces, this.state.round.deckSeed, this.state.round.drawCursor, this.state.round.ownerMarker);
+        this.state.player.dealerTotal = d.total;
+        this.state.round.dealerSoftAces = d.softAces;
+        this.state.round.drawCursor = d.cursor;
+        this.state.round.dealerCardCount += 1;
+        this.state.hands.dealer.push(d.rank);
+        this.state.player.roundStatus = ROUND_ACTIVE;
+        this.state.player.outcome = ROUND_ACTIVE;
+        this.state.player.inRound = true;
+        return step;
+    }
+    async hit() {
+        const step = await this.call('hit', {});
+        if (!step.ok)
+            return step;
+        const d = addCard(this.state.player.handTotal, this.state.round.playerSoftAces, this.state.round.deckSeed, this.state.round.drawCursor, this.state.round.ownerMarker);
+        this.state.player.handTotal = d.total;
+        this.state.round.playerSoftAces = d.softAces;
+        this.state.round.drawCursor = d.cursor;
+        this.state.round.playerCardCount += 1;
+        this.state.hands.player.push(d.rank);
+        if (this.state.player.handTotal > 21) {
+            this.state.player.roundStatus = ROUND_PLAYER_BUST;
+            this.state.player.outcome = ROUND_DEALER_WIN;
+            this.state.player.chips -= this.state.player.activeBet;
+            this.state.player.inRound = false;
+            this.state.hands.dealerReveal = true;
+        }
+        return step;
+    }
+    async stand() {
+        const step = await this.call('stand_and_settle', {});
+        if (!step.ok)
+            return step;
+        this.state.round.playerStand = true;
+        let dealerTotal = this.state.player.dealerTotal;
+        let dealerSoftAces = this.state.round.dealerSoftAces;
+        let dealerCursor = this.state.round.drawCursor;
+        let dealerGuard = 0;
+        while (dealerShouldDraw(dealerTotal, dealerSoftAces, this.state.table.dealerSoft17Hits) &&
+            dealerGuard < 8) {
+            const d = addCard(dealerTotal, dealerSoftAces, this.state.round.deckSeed, dealerCursor, this.state.round.ownerMarker);
+            dealerTotal = d.total;
+            dealerSoftAces = d.softAces;
+            dealerCursor = d.cursor;
+            dealerGuard += 1;
+            this.state.round.dealerCardCount += 1;
+            this.state.hands.dealer.push(d.rank);
+        }
+        this.state.round.dealerSoftAces = dealerSoftAces;
+        this.state.round.drawCursor = dealerCursor;
+        this.state.player.dealerTotal = dealerTotal;
+        if (dealerTotal > 21) {
+            this.state.player.roundStatus = ROUND_DEALER_BUST;
+            this.state.player.outcome = ROUND_PLAYER_WIN;
+            this.state.player.chips += this.state.player.activeBet;
+        }
+        else if (this.state.player.handTotal > dealerTotal) {
+            this.state.player.roundStatus = ROUND_PLAYER_WIN;
+            this.state.player.outcome = ROUND_PLAYER_WIN;
+            this.state.player.chips += this.state.player.activeBet;
+        }
+        else if (this.state.player.handTotal < dealerTotal) {
+            this.state.player.roundStatus = ROUND_DEALER_WIN;
+            this.state.player.outcome = ROUND_DEALER_WIN;
+            this.state.player.chips -= this.state.player.activeBet;
+        }
+        else {
+            this.state.player.roundStatus = ROUND_PUSH;
+            this.state.player.outcome = ROUND_PUSH;
+        }
+        this.state.player.inRound = false;
+        this.state.player.activeBet = 0;
+        this.state.hands.dealerReveal = true;
+        return step;
+    }
+    async readBack() {
+        const steps = [];
+        steps.push(await this.call('get_player_chips', {}));
+        steps.push(await this.call('get_round_status', {}));
+        steps.push(await this.call('get_last_outcome', {}));
+        return steps;
+    }
+}

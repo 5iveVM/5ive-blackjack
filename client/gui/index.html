@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>5ive Blackjack Localnet</title>
+  <style>
+    :root {
+      --felt-a: #0b5f3d;
+      --felt-b: #063824;
+      --line: #d7c89c;
+      --ink: #f4f4f5;
+      --muted: #d4d4d8;
+      --card-bg: #fffefb;
+      --card-ink: #18181b;
+      --danger: #dc2626;
+      --btn: #0f172a;
+      --btn-b: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 20% 10%, #1f2937 0%, #020617 65%);
+      padding: 16px;
+    }
+    .table {
+      max-width: 1100px;
+      margin: 0 auto;
+      border: 2px solid var(--line);
+      border-radius: 24px;
+      padding: 18px;
+      background:
+        radial-gradient(1200px 700px at 50% -20%, rgba(255,255,255,.08), transparent 60%),
+        linear-gradient(160deg, var(--felt-a), var(--felt-b));
+      box-shadow: 0 30px 80px rgba(0,0,0,.45);
+    }
+    .head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .title { font-size: 28px; font-weight: 800; letter-spacing: .4px; }
+    .subtitle { color: var(--muted); font-size: 13px; }
+    .status {
+      margin: 8px 0 14px;
+      min-height: 22px;
+      color: #bef264;
+      font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+      font-size: 13px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+    .hand {
+      border: 1px solid rgba(215, 200, 156, .45);
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(2, 6, 23, .25);
+    }
+    .hand-head {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      font-weight: 700;
+    }
+    .cards {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      min-height: 124px;
+      align-items: center;
+    }
+    .card {
+      width: 78px;
+      height: 108px;
+      border-radius: 10px;
+      background: var(--card-bg);
+      color: var(--card-ink);
+      border: 1px solid #d4d4d8;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 8px;
+      box-shadow: 0 8px 18px rgba(0,0,0,.24);
+      font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    }
+    .card.hidden {
+      background: repeating-linear-gradient(45deg, #0f172a, #0f172a 8px, #1e293b 8px, #1e293b 16px);
+      border-color: #64748b;
+      color: transparent;
+    }
+    .card.red { color: var(--danger); }
+    .top { font-weight: 700; }
+    .mid { text-align: center; font-size: 19px; }
+    .bot { text-align: right; font-weight: 700; }
+
+    .actions {
+      border: 1px solid rgba(215, 200, 156, .45);
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(2, 6, 23, .25);
+      display: grid;
+      gap: 10px;
+    }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    input, button {
+      border-radius: 10px;
+      border: 1px solid var(--btn-b);
+      background: var(--btn);
+      color: var(--ink);
+      font-size: 14px;
+      padding: 9px 10px;
+    }
+    input { width: 126px; }
+    button { cursor: pointer; font-weight: 600; }
+    button:hover { border-color: #94a3b8; }
+    .tech {
+      margin-top: 14px;
+      border: 1px solid rgba(215,200,156,.45);
+      border-radius: 12px;
+      background: rgba(2,6,23,.45);
+      padding: 8px 10px;
+    }
+    details summary { cursor: pointer; font-weight: 700; }
+    .tech-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .panel { border: 1px solid #334155; border-radius: 10px; overflow: hidden; }
+    .panel h4 { margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted); background: #0b1220; }
+    pre {
+      margin: 0;
+      max-height: 220px;
+      overflow: auto;
+      font-size: 11px;
+      font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+      padding: 10px;
+      background: #020617;
+      color: #e2e8f0;
+    }
+    @media (max-width: 900px) {
+      .tech-grid { grid-template-columns: 1fr; }
+      .title { font-size: 23px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="table">
+    <div class="head">
+      <div>
+        <div class="title">Blackjack</div>
+        <div class="subtitle">5ive localnet live table</div>
+      </div>
+      <div id="summary" class="subtitle">chips: 0 | bet: 0 | outcome: idle</div>
+    </div>
+
+    <div class="status" id="status">ready</div>
+
+    <section class="layout">
+      <section class="hand">
+        <div class="hand-head"><span>Dealer</span><span id="dealerTotal">total: 0</span></div>
+        <div class="cards" id="dealerCards"></div>
+      </section>
+
+      <section class="hand">
+        <div class="hand-head"><span>Player</span><span id="playerTotal">total: 0</span></div>
+        <div class="cards" id="playerCards"></div>
+      </section>
+
+      <section class="actions">
+        <div class="row">
+          <input id="initialChips" type="number" value="500" placeholder="initial chips" />
+          <input id="bet" type="number" value="25" placeholder="bet" />
+          <input id="seed" type="number" value="1337" placeholder="seed" />
+        </div>
+        <div class="row">
+          <button id="initBtn">Init Game</button>
+          <button id="startBtn">Deal</button>
+          <button id="hitBtn">Hit</button>
+          <button id="standBtn">Stand</button>
+          <button id="stateBtn">Refresh</button>
+        </div>
+      </section>
+    </section>
+
+    <section class="tech">
+      <details>
+        <summary>Technical Details</summary>
+        <div class="tech-grid">
+          <section class="panel">
+            <h4>State</h4>
+            <pre id="state">{}</pre>
+          </section>
+          <section class="panel">
+            <h4>Last Action</h4>
+            <pre id="action">{}</pre>
+          </section>
+          <section class="panel">
+            <h4>Addresses</h4>
+            <pre id="addresses">{}</pre>
+          </section>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <script>
+    const stateEl = document.getElementById('state');
+    const actionEl = document.getElementById('action');
+    const addressesEl = document.getElementById('addresses');
+    const statusEl = document.getElementById('status');
+    const summaryEl = document.getElementById('summary');
+    const dealerTotalEl = document.getElementById('dealerTotal');
+    const playerTotalEl = document.getElementById('playerTotal');
+    const dealerCardsEl = document.getElementById('dealerCards');
+    const playerCardsEl = document.getElementById('playerCards');
+
+    const q = (id) => document.getElementById(id);
+
+    function rankLabel(rank) {
+      if (rank === 1) return 'A';
+      if (rank === 11) return 'J';
+      if (rank === 12) return 'Q';
+      if (rank === 13) return 'K';
+      return String(rank || '?');
+    }
+
+    function suitFor(index, seed) {
+      const suits = ['♠', '♥', '♦', '♣'];
+      return suits[Math.abs((seed + index * 3) % 4)];
+    }
+
+    function outcomeLabel(code) {
+      const map = {
+        0: 'idle',
+        1: 'active',
+        2: 'player bust',
+        3: 'dealer bust',
+        4: 'player win',
+        5: 'dealer win',
+        6: 'push'
+      };
+      return map[code] || `status:${code}`;
+    }
+
+    function cardNode(rank, index, seed, hidden) {
+      const card = document.createElement('article');
+      card.className = `card ${hidden ? 'hidden' : ''}`;
+      if (hidden) {
+        card.innerHTML = `<div class="top">?</div><div class="mid">?</div><div class="bot">?</div>`;
+        return card;
+      }
+      const suit = suitFor(index, seed || 0);
+      const label = rankLabel(rank);
+      const red = suit === '♥' || suit === '♦';
+      if (red) card.classList.add('red');
+      card.innerHTML = `<div class="top">${label}${suit}</div><div class="mid">${suit}</div><div class="bot">${label}${suit}</div>`;
+      return card;
+    }
+
+    async function call(path, payload) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || body.message || 'request failed');
+      return body;
+    }
+
+    function paintCards(state) {
+      dealerCardsEl.innerHTML = '';
+      playerCardsEl.innerHTML = '';
+
+      const player = state?.hands?.player || [];
+      const dealer = state?.hands?.dealer || [];
+      const revealDealer = Boolean(state?.hands?.dealerReveal);
+      const seed = Number(state?.round?.deckSeed || 0);
+
+      player.forEach((rank, i) => playerCardsEl.appendChild(cardNode(rank, i, seed + 11, false)));
+      dealer.forEach((rank, i) => {
+        const hidden = !revealDealer && i === 1;
+        dealerCardsEl.appendChild(cardNode(rank, i, seed + 29, hidden));
+      });
+
+      if (player.length === 0) {
+        playerCardsEl.innerHTML = '<span class="subtitle">No cards yet</span>';
+      }
+      if (dealer.length === 0) {
+        dealerCardsEl.innerHTML = '<span class="subtitle">No cards yet</span>';
+      }
+    }
+
+    function paint(body) {
+      const state = body.state || {};
+      const player = state.player || {};
+
+      if (body.state) stateEl.textContent = JSON.stringify(body.state, null, 2);
+      if (body.lastAction !== undefined) actionEl.textContent = JSON.stringify(body.lastAction, null, 2);
+      if (body.addresses) addressesEl.textContent = JSON.stringify(body.addresses, null, 2);
+
+      paintCards(state);
+
+      const dealerShown = state?.hands?.dealerReveal ? (player.dealerTotal ?? 0) : '?';
+      dealerTotalEl.textContent = `total: ${dealerShown}`;
+      playerTotalEl.textContent = `total: ${player.handTotal ?? 0}`;
+
+      summaryEl.textContent = `chips: ${player.chips ?? 0} | bet: ${player.activeBet ?? 0} | outcome: ${outcomeLabel(player.outcome ?? 0)}`;
+      statusEl.textContent = body.message || 'ok';
+    }
+
+    async function action(fn) {
+      try {
+        statusEl.textContent = 'processing...';
+        const body = await fn();
+        paint(body);
+      } catch (err) {
+        statusEl.textContent = String(err.message || err);
+      }
+    }
+
+    q('initBtn').onclick = () => action(() => call('/api/init', {
+      initialChips: Number(q('initialChips').value || 500),
+      minBet: 10,
+      maxBet: 100,
+      dealerSoft17Hits: true,
+    }));
+
+    q('startBtn').onclick = () => action(() => call('/api/start', {
+      bet: Number(q('bet').value || 25),
+      seed: Number(q('seed').value || Date.now() % 1000000),
+    }));
+
+    q('hitBtn').onclick = () => action(() => call('/api/hit'));
+    q('standBtn').onclick = () => action(() => call('/api/stand'));
+    q('stateBtn').onclick = () => action(() => call('/api/state'));
+
+    action(() => call('/api/state'));
+  </script>
+</body>
+</html>

@@ -6,7 +6,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
-    "run": "npm run build && node dist/main.js"
+    "run": "npm run build && node dist/main.js",
+    "test:localnet": "npm run build && node --test dist/tests/localnet.test.js",
+    "test:journey:localnet": "npm run build && node --test dist/tests/user-journey.localnet.test.js",
+    "journey:localnet": "npm run build && node dist/journey.localnet.js",
+    "gui:localnet": "npm run build && node dist/gui-server.js"
   },
   "dependencies": {
     "@5ive-tech/sdk": "^1.1.7",
