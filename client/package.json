@@ -9,6 +9,9 @@
     "run": "npm run build && node dist/main.js",
     "test:localnet": "npm run build && node --test dist/tests/localnet.test.js",
     "test:journey:localnet": "npm run build && node --test dist/tests/user-journey.localnet.test.js",
+    "test:webflow:localnet": "npm run build && node --test dist/tests/web-flow.localnet.test.js",
+    "test:gui:strict:localnet": "npm run build && node --test dist/tests/gui-server.strict.localnet.test.js",
+    "test:gui:builder:localnet": "npm run build && node --test dist/tests/gui-server.builder.localnet.test.js",
     "journey:localnet": "npm run build && node dist/journey.localnet.js",
     "gui:localnet": "npm run build && node dist/gui-server.js"
   },

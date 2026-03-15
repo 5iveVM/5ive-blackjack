@@ -3,12 +3,14 @@ import { readFile } from 'fs/promises';
 import { resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { PublicKey } from '@solana/web3.js';
 import { LocalnetBlackjackEngine } from './src/localnet-engine.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..', '..');
 const htmlPath = resolve(projectRoot, 'client', 'gui', 'index.html');
 let enginePromise = null;
 let queue = Promise.resolve();
+let lastAction = null;
 function withLock(fn) {
     const run = queue.then(fn, fn);
     queue = run.then(() => undefined, () => undefined);
@@ -16,7 +18,10 @@ function withLock(fn) {
 }
 async function getEngine() {
     if (!enginePromise) {
-        enginePromise = LocalnetBlackjackEngine.create(projectRoot);
+        enginePromise = LocalnetBlackjackEngine.create(projectRoot).catch((err) => {
+            enginePromise = null;
+            throw err;
+        });
     }
     return enginePromise;
 }
@@ -53,50 +58,86 @@ const server = createServer(async (req, res) => {
                     message: 'state loaded',
                     state: engine.getState(),
                     addresses: engine.getAddresses(),
-                    lastAction: null,
+                    lastAction,
                 });
             }
-            if (req.url === '/api/init') {
-                const steps = await engine.initGame({
-                    minBet: Number(payload.minBet ?? 10),
-                    maxBet: Number(payload.maxBet ?? 100),
-                    dealerSoft17Hits: payload.dealerSoft17Hits !== false,
-                    initialChips: Number(payload.initialChips ?? 500),
-                });
+            if (req.url === '/api/ready') {
+                const addresses = engine.getAddresses();
+                const wallet = String(payload.wallet || '');
+                const minSol = Number(payload.minSol || 0.1);
+                const minLamports = Math.max(1, Math.floor(minSol * 1_000_000_000));
+                const [latestBlockhash, vmInfo, scriptInfo] = await Promise.all([
+                    engine.connection.getLatestBlockhash('confirmed'),
+                    engine.connection.getAccountInfo(new PublicKey(addresses.fiveVmProgramId), 'confirmed'),
+                    engine.connection.getAccountInfo(new PublicKey(addresses.scriptAccount), 'confirmed'),
+                ]);
+                let walletInfo = null;
+                if (wallet) {
+                    const lamports = await engine.connection.getBalance(new PublicKey(wallet), 'confirmed');
+                    walletInfo = {
+                        address: wallet,
+                        lamports,
+                        balanceSol: lamports / 1_000_000_000,
+                        minSol,
+                        hasMinFunds: lamports >= minLamports,
+                    };
+                }
+                const ok = Boolean(latestBlockhash?.blockhash && vmInfo && scriptInfo && (walletInfo ? walletInfo.hasMinFunds : true));
                 return sendJson(res, 200, {
-                    message: 'game initialized',
-                    state: engine.getState(),
-                    addresses: engine.getAddresses(),
-                    lastAction: steps,
+                    ok,
+                    validator: { ok: Boolean(latestBlockhash?.blockhash), blockhash: latestBlockhash?.blockhash || null },
+                    vmProgram: { ok: Boolean(vmInfo), address: addresses.fiveVmProgramId },
+                    scriptAccount: { ok: Boolean(scriptInfo), address: addresses.scriptAccount },
+                    wallet: walletInfo,
                 });
             }
-            if (req.url === '/api/start') {
-                const step = await engine.startRound(Number(payload.bet ?? 25), Number(payload.seed ?? Date.now() % 1_000_000));
-                return sendJson(res, step.ok ? 200 : 400, {
-                    message: step.ok ? 'round started' : 'start failed',
-                    state: engine.getState(),
-                    addresses: engine.getAddresses(),
-                    lastAction: step,
-                });
+            if (req.url === '/api/build-wallet-action') {
+                const action = String(payload.action || '');
+                const wallet = String(payload.wallet || '');
+                if (!wallet) {
+                    return sendJson(res, 400, { error: 'wallet is required' });
+                }
+                let functionName = '';
+                let args = {};
+                if (action === 'init') {
+                    functionName = 'init_table';
+                    args = {
+                        min_bet: Number(payload.minBet ?? 10),
+                        max_bet: Number(payload.maxBet ?? 100),
+                        dealer_soft17_hits: payload.dealerSoft17Hits !== false,
+                    };
+                }
+                else if (action === 'start') {
+                    functionName = 'start_round';
+                    args = {
+                        bet: Number(payload.bet ?? 25),
+                        seed: Number(payload.seed ?? Date.now() % 1_000_000),
+                    };
+                }
+                else if (action === 'hit') {
+                    functionName = 'hit';
+                }
+                else if (action === 'stand') {
+                    functionName = 'stand_and_settle';
+                }
+                else {
+                    return sendJson(res, 400, { error: `unsupported action: ${action}` });
+                }
+                const txBase64 = await engine.buildUnsignedTx(functionName, 'p1', args, wallet);
+                return sendJson(res, 200, { action, functionName, txBase64 });
             }
-            if (req.url === '/api/hit') {
-                const step = await engine.hit();
-                return sendJson(res, step.ok ? 200 : 400, {
-                    message: step.ok ? 'hit executed' : 'hit failed',
-                    state: engine.getState(),
-                    addresses: engine.getAddresses(),
-                    lastAction: step,
-                });
-            }
-            if (req.url === '/api/stand') {
-                const step = await engine.stand();
-                const reads = await engine.readBack();
-                return sendJson(res, step.ok ? 200 : 400, {
-                    message: step.ok ? 'stand settled' : 'stand failed',
-                    state: engine.getState(),
-                    addresses: engine.getAddresses(),
-                    lastAction: { step, reads },
-                });
+            if (req.url === '/api/commit-wallet-action') {
+                const action = String(payload.action || '');
+                const signature = String(payload.signature || '');
+                if (!signature) {
+                    return sendJson(res, 400, { error: 'signature is required for commit' });
+                }
+                if (Boolean(payload.simulated)) {
+                    return sendJson(res, 400, { error: 'simulated commits are not allowed in strict on-chain mode' });
+                }
+                await engine.applyLocalAction(action, payload);
+                lastAction = { kind: 'wallet-action', action, signature };
+                return sendJson(res, 200, { ok: true, state: engine.getState(), addresses: engine.getAddresses(), lastAction });
             }
             return sendJson(res, 404, { error: 'unknown endpoint' });
         });
@@ -107,7 +148,36 @@ const server = createServer(async (req, res) => {
         });
     }
 });
-const port = Number(process.env.GUI_PORT || 4177);
-server.listen(port, () => {
-    console.log(`Blackjack GUI server listening on http://127.0.0.1:${port}`);
+const basePort = Number(process.env.GUI_PORT || 4177);
+const host = process.env.GUI_HOST || '0.0.0.0';
+let activePort = basePort;
+let listening = false;
+function startListening(port) {
+    activePort = port;
+    server.listen(activePort, host, () => {
+        listening = true;
+        console.log(`Blackjack GUI server listening on http://${host}:${activePort}`);
+    });
+}
+server.on('error', (err) => {
+    if (err?.code === 'EADDRINUSE' && !listening && activePort < basePort + 20) {
+        const next = activePort + 1;
+        console.warn(`Port ${activePort} in use, retrying on ${next}...`);
+        return startListening(next);
+    }
+    console.error('GUI server fatal error:', err);
+    process.exit(1);
 });
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught exception:', error);
+});
+process.on('SIGTERM', () => {
+    server.close(() => process.exit(0));
+});
+process.on('SIGINT', () => {
+    server.close(() => process.exit(0));
+});
+startListening(basePort);
