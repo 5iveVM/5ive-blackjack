@@ -59,6 +59,7 @@ export type GameSetup = {
   dealerSoft17Hits: boolean;
   initialChips: number;
 };
+export type Role = 'p1';
 
 const ROUND_IDLE = 0;
 const ROUND_ACTIVE = 1;
@@ -414,68 +415,71 @@ export class LocalnetBlackjackEngine {
     return {};
   }
 
-  private async call(functionName: string, args: Record<string, any> = {}): Promise<StepResult> {
+  private builderFor(functionName: string, args: Record<string, any> = {}, walletPubkey?: string) {
     let builder = this.program
       .function(functionName)
-      .payer(this.payer.publicKey.toBase58())
+      .payer(walletPubkey || this.payer.publicKey.toBase58())
       .accounts(this.accountsFor(functionName));
     if (Object.keys(args).length > 0) {
       builder = builder.args(args);
     }
+    return builder;
+  }
+
+  private async call(functionName: string, args: Record<string, any> = {}): Promise<StepResult> {
+    const builder = this.builderFor(functionName, args);
     const ix = await builder.instruction();
     return sendIx(this.connection, this.payer, ix, [], functionName);
   }
 
-  async initGame(setup: GameSetup): Promise<StepResult[]> {
-    const steps: StepResult[] = [];
-
-    const initTable = await this.call('init_table', {
-      min_bet: setup.minBet,
-      max_bet: setup.maxBet,
-      dealer_soft17_hits: setup.dealerSoft17Hits,
-    });
-    steps.push(initTable);
-
-    const initPlayer = await this.call('init_player', {
-      initial_chips: setup.initialChips,
-    });
-    steps.push(initPlayer);
-
-    if (initTable.ok && initPlayer.ok) {
-      this.state.table.minBet = setup.minBet;
-      this.state.table.maxBet = setup.maxBet;
-      this.state.table.dealerSoft17Hits = setup.dealerSoft17Hits;
-      this.state.table.roundNonce = 0;
-
-      this.state.player.chips = setup.initialChips;
-      this.state.player.activeBet = 0;
-      this.state.player.handTotal = 0;
-      this.state.player.dealerTotal = 0;
-      this.state.player.roundStatus = ROUND_IDLE;
-      this.state.player.outcome = ROUND_IDLE;
-      this.state.player.inRound = false;
-
-      this.state.round.deckSeed = 0;
-      this.state.round.ownerMarker = 0;
-      this.state.round.drawCursor = 0;
-      this.state.round.playerCardCount = 0;
-      this.state.round.dealerCardCount = 0;
-      this.state.round.playerSoftAces = 0;
-      this.state.round.dealerSoftAces = 0;
-      this.state.round.playerStand = false;
-
-      this.state.hands.player = [];
-      this.state.hands.dealer = [];
-      this.state.hands.dealerReveal = false;
-    }
-
-    return steps;
+  async buildUnsignedTx(functionName: string, _role: Role, args: Record<string, any>, walletPubkey: string): Promise<string> {
+    const builder = this.builderFor(functionName, args, walletPubkey);
+    const ix = await builder.instruction();
+    const tx = new Transaction().add(
+      new TransactionInstruction({
+        programId: new PublicKey(ix.programId),
+        keys: ix.keys.map((k: any) => ({
+          pubkey: new PublicKey(k.pubkey),
+          isSigner: k.isSigner,
+          isWritable: k.isWritable,
+        })),
+        data: Buffer.from(ix.data, 'base64'),
+      })
+    );
+    tx.feePayer = new PublicKey(walletPubkey);
+    tx.recentBlockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+    return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
   }
 
-  async startRound(bet: number, seed: number): Promise<StepResult> {
-    const step = await this.call('start_round', { bet, seed });
-    if (!step.ok) return step;
+  private applyInitLocal(setup: GameSetup) {
+    this.state.table.minBet = setup.minBet;
+    this.state.table.maxBet = setup.maxBet;
+    this.state.table.dealerSoft17Hits = setup.dealerSoft17Hits;
+    this.state.table.roundNonce = 0;
 
+    this.state.player.chips = setup.initialChips;
+    this.state.player.activeBet = 0;
+    this.state.player.handTotal = 0;
+    this.state.player.dealerTotal = 0;
+    this.state.player.roundStatus = ROUND_IDLE;
+    this.state.player.outcome = ROUND_IDLE;
+    this.state.player.inRound = false;
+
+    this.state.round.deckSeed = 0;
+    this.state.round.ownerMarker = 0;
+    this.state.round.drawCursor = 0;
+    this.state.round.playerCardCount = 0;
+    this.state.round.dealerCardCount = 0;
+    this.state.round.playerSoftAces = 0;
+    this.state.round.dealerSoftAces = 0;
+    this.state.round.playerStand = false;
+
+    this.state.hands.player = [];
+    this.state.hands.dealer = [];
+    this.state.hands.dealerReveal = false;
+  }
+
+  private applyStartRoundLocal(bet: number, seed: number) {
     this.state.table.roundNonce += 1;
 
     this.state.round.deckSeed = seed;
@@ -550,14 +554,9 @@ export class LocalnetBlackjackEngine {
     this.state.player.roundStatus = ROUND_ACTIVE;
     this.state.player.outcome = ROUND_ACTIVE;
     this.state.player.inRound = true;
-
-    return step;
   }
 
-  async hit(): Promise<StepResult> {
-    const step = await this.call('hit', {});
-    if (!step.ok) return step;
-
+  private applyHitLocal() {
     const d = addCard(
       this.state.player.handTotal,
       this.state.round.playerSoftAces,
@@ -578,14 +577,9 @@ export class LocalnetBlackjackEngine {
       this.state.player.inRound = false;
       this.state.hands.dealerReveal = true;
     }
-
-    return step;
   }
 
-  async stand(): Promise<StepResult> {
-    const step = await this.call('stand_and_settle', {});
-    if (!step.ok) return step;
-
+  private applyStandLocal() {
     this.state.round.playerStand = true;
 
     let dealerTotal = this.state.player.dealerTotal;
@@ -636,6 +630,76 @@ export class LocalnetBlackjackEngine {
     this.state.player.inRound = false;
     this.state.player.activeBet = 0;
     this.state.hands.dealerReveal = true;
+  }
+
+  async applyLocalAction(action: string, payload: Record<string, any>): Promise<void> {
+    if (action === 'init') {
+      this.applyInitLocal({
+        minBet: Number(payload.minBet ?? 10),
+        maxBet: Number(payload.maxBet ?? 100),
+        dealerSoft17Hits: payload.dealerSoft17Hits !== false,
+        initialChips: Number(payload.initialChips ?? 500),
+      });
+      return;
+    }
+    if (action === 'start') {
+      this.applyStartRoundLocal(Number(payload.bet ?? 25), Number(payload.seed ?? Date.now() % 1_000_000));
+      return;
+    }
+    if (action === 'hit') {
+      this.applyHitLocal();
+      return;
+    }
+    if (action === 'stand') {
+      this.applyStandLocal();
+      await this.readBack();
+      return;
+    }
+    throw new Error(`unsupported action: ${action}`);
+  }
+
+  async initGame(setup: GameSetup): Promise<StepResult[]> {
+    const steps: StepResult[] = [];
+
+    const initTable = await this.call('init_table', {
+      min_bet: setup.minBet,
+      max_bet: setup.maxBet,
+      dealer_soft17_hits: setup.dealerSoft17Hits,
+    });
+    steps.push(initTable);
+
+    const initPlayer = await this.call('init_player', {
+      initial_chips: setup.initialChips,
+    });
+    steps.push(initPlayer);
+
+    if (initTable.ok && initPlayer.ok) {
+      this.applyInitLocal(setup);
+    }
+
+    return steps;
+  }
+
+  async startRound(bet: number, seed: number): Promise<StepResult> {
+    const step = await this.call('start_round', { bet, seed });
+    if (!step.ok) return step;
+    this.applyStartRoundLocal(bet, seed);
+
+    return step;
+  }
+
+  async hit(): Promise<StepResult> {
+    const step = await this.call('hit', {});
+    if (!step.ok) return step;
+    this.applyHitLocal();
+
+    return step;
+  }
+
+  async stand(): Promise<StepResult> {
+    const step = await this.call('stand_and_settle', {});
+    if (!step.ok) return step;
+    this.applyStandLocal();
 
     return step;
   }

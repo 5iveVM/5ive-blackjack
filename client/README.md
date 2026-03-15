@@ -32,6 +32,11 @@ npm run client:gui:localnet
 
 It auto-deploys script bytecode (unless `FIVE_SCRIPT_ACCOUNT` is set), provisions fresh on-chain table/player/round accounts, and lets you play rounds (`init`, `start`, `hit`, `stand`) from the browser.
 
+GUI mode is strict wallet-only:
+- connect Phantom and sign/send all action transactions in browser
+- server only handles `state`, `ready`, `build-wallet-action`, and `commit-wallet-action`
+- no mock wallet, no fallback/server-side signing paths
+
 Prereqs for journey/GUI:
 - local validator running at `http://127.0.0.1:8899`
 - Five VM program deployed on that validator (or set `FIVE_VM_PROGRAM_ID` to the deployed address)

@@ -110,6 +110,14 @@
       gap: 10px;
     }
     .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .wallet-row { align-items: center; }
+    .pill {
+      border: 1px solid var(--btn-b);
+      border-radius: 999px;
+      font-size: 12px;
+      padding: 6px 10px;
+      color: var(--muted);
+    }
     input, button {
       border-radius: 10px;
       border: 1px solid var(--btn-b);
@@ -121,34 +129,32 @@
     input { width: 126px; }
     button { cursor: pointer; font-weight: 600; }
     button:hover { border-color: #94a3b8; }
-    .tech {
-      margin-top: 14px;
-      border: 1px solid rgba(215,200,156,.45);
-      border-radius: 12px;
-      background: rgba(2,6,23,.45);
-      padding: 8px 10px;
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+      border-color: #334155;
     }
-    details summary { cursor: pointer; font-weight: 700; }
-    .tech-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 10px;
+    .primary {
+      background: linear-gradient(180deg, #0b3b69, #08243f);
+      border-color: #2563eb;
     }
-    .panel { border: 1px solid #334155; border-radius: 10px; overflow: hidden; }
-    .panel h4 { margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted); background: #0b1220; }
-    pre {
-      margin: 0;
-      max-height: 220px;
-      overflow: auto;
-      font-size: 11px;
-      font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
-      padding: 10px;
-      background: #020617;
-      color: #e2e8f0;
+    .warn {
+      background: linear-gradient(180deg, #5b1f1f, #3b1111);
+      border-color: #dc2626;
     }
+    .result-banner {
+      border: 1px solid rgba(215, 200, 156, .45);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-weight: 700;
+      font-size: 14px;
+      background: rgba(2, 6, 23, .35);
+      color: var(--ink);
+    }
+    .result-win { color: #86efac; border-color: rgba(34, 197, 94, 0.45); }
+    .result-lose { color: #fca5a5; border-color: rgba(239, 68, 68, 0.45); }
+    .result-push { color: #fde68a; border-color: rgba(245, 158, 11, 0.45); }
     @media (max-width: 900px) {
-      .tech-grid { grid-template-columns: 1fr; }
       .title { font-size: 23px; }
     }
   </style>
@@ -177,54 +183,47 @@
       </section>
 
       <section class="actions">
-        <div class="row">
-          <input id="initialChips" type="number" value="500" placeholder="initial chips" />
-          <input id="bet" type="number" value="25" placeholder="bet" />
-          <input id="seed" type="number" value="1337" placeholder="seed" />
+        <div class="row wallet-row">
+          <span id="walletStatus" class="pill">not connected</span>
+          <button id="walletConnect">Connect Wallet</button>
+          <button id="walletDisconnect" style="display:none">Disconnect</button>
         </div>
         <div class="row">
-          <button id="initBtn">Init Game</button>
-          <button id="startBtn">Deal</button>
+          <input id="bet" type="number" value="25" placeholder="bet" />
+        </div>
+        <div id="resultBanner" class="result-banner" style="display:none"></div>
+        <div class="row">
+          <button id="startBtn" class="primary">Deal Hand</button>
           <button id="hitBtn">Hit</button>
-          <button id="standBtn">Stand</button>
-          <button id="stateBtn">Refresh</button>
+          <button id="standBtn" class="warn">Stand</button>
         </div>
       </section>
     </section>
-
-    <section class="tech">
-      <details>
-        <summary>Technical Details</summary>
-        <div class="tech-grid">
-          <section class="panel">
-            <h4>State</h4>
-            <pre id="state">{}</pre>
-          </section>
-          <section class="panel">
-            <h4>Last Action</h4>
-            <pre id="action">{}</pre>
-          </section>
-          <section class="panel">
-            <h4>Addresses</h4>
-            <pre id="addresses">{}</pre>
-          </section>
-        </div>
-      </details>
-    </section>
   </main>
 
+  <script src="https://unpkg.com/@solana/web3.js@1.98.2/lib/index.iife.min.js"></script>
   <script>
-    const stateEl = document.getElementById('state');
-    const actionEl = document.getElementById('action');
-    const addressesEl = document.getElementById('addresses');
     const statusEl = document.getElementById('status');
     const summaryEl = document.getElementById('summary');
     const dealerTotalEl = document.getElementById('dealerTotal');
     const playerTotalEl = document.getElementById('playerTotal');
     const dealerCardsEl = document.getElementById('dealerCards');
     const playerCardsEl = document.getElementById('playerCards');
+    const walletStatusEl = document.getElementById('walletStatus');
+    const resultBannerEl = document.getElementById('resultBanner');
+    const startBtn = document.getElementById('startBtn');
+    const hitBtn = document.getElementById('hitBtn');
+    const standBtn = document.getElementById('standBtn');
+    const walletConnectBtn = document.getElementById('walletConnect');
+    const walletDisconnectBtn = document.getElementById('walletDisconnect');
 
     const q = (id) => document.getElementById(id);
+    const shortKey = (k) => (k && k.length > 12 ? `${k.slice(0, 4)}...${k.slice(-4)}` : k || '-');
+    let walletProvider = null;
+    let walletAddress = '';
+    let solanaConnection = null;
+    let currentState = null;
+    let inFlight = false;
 
     function rankLabel(rank) {
       if (rank === 1) return 'A';
@@ -267,16 +266,153 @@
       return card;
     }
 
-    async function call(path, payload) {
+    const call = async (path, payload = {}) => {
       const res = await fetch(path, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload || {}),
+        body: JSON.stringify({ ...payload, wallet: walletAddress || null }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || body.message || 'request failed');
       return body;
-    }
+    };
+
+    const ensureConnection = () => {
+      if (!solanaConnection) {
+        solanaConnection = new window.solanaWeb3.Connection('http://127.0.0.1:8899', 'confirmed');
+      }
+      return solanaConnection;
+    };
+
+    const walletReady = () => Boolean(walletAddress && walletProvider && window.solanaWeb3?.Transaction);
+    const walletSupportsSend = () => Boolean(walletProvider?.signTransaction || walletProvider?.sendTransaction || walletProvider?.signAndSendTransaction);
+
+    const requireWallet = () => {
+      if (!walletReady()) throw new Error('Connect Phantom to sign actions.');
+      if (!walletSupportsSend()) throw new Error('Wallet adapter does not support transaction signing/sending.');
+    };
+
+    const updateWalletUi = () => {
+      const isConnected = Boolean(walletAddress);
+      walletConnectBtn.style.display = isConnected ? 'none' : 'inline-block';
+      walletDisconnectBtn.style.display = isConnected ? 'inline-block' : 'none';
+      if (walletAddress) {
+        walletStatusEl.textContent = `${shortKey(walletAddress)} (signed)`;
+        walletStatusEl.style.color = 'var(--ink)';
+      } else if (walletProvider) {
+        walletStatusEl.textContent = 'disconnected';
+      } else {
+        walletStatusEl.textContent = 'Phantom not found';
+        walletStatusEl.style.color = 'var(--danger)';
+      }
+      updateActionButtons();
+    };
+
+    const txFromBase64 = (txBase64) =>
+      window.solanaWeb3.Transaction.from(Uint8Array.from(atob(txBase64), (c) => c.charCodeAt(0)));
+
+    const sendAndConfirm = async (tx) => {
+      requireWallet();
+      const connection = ensureConnection();
+      tx.feePayer = new window.solanaWeb3.PublicKey(walletAddress);
+      tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+
+      let signature = '';
+      if (walletProvider.signTransaction) {
+        const signedTx = await walletProvider.signTransaction(tx);
+        signature = await connection.sendRawTransaction(signedTx.serialize(), { skipPreflight: false });
+      } else if (walletProvider.sendTransaction) {
+        signature = await walletProvider.sendTransaction(tx, connection);
+      } else if (walletProvider.signAndSendTransaction) {
+        const sent = await walletProvider.signAndSendTransaction(tx);
+        signature = sent?.signature || '';
+      }
+      if (!signature) throw new Error('Wallet returned empty signature.');
+      await connection.confirmTransaction(signature, 'confirmed');
+      const confirmedSlot = await connection.getSlot('confirmed');
+      return { signature, confirmedSlot };
+    };
+
+    const actionPayload = (action) => {
+      if (action === 'init') {
+        return {
+          initialChips: 500,
+          minBet: 10,
+          maxBet: 100,
+          dealerSoft17Hits: true,
+        };
+      }
+      if (action === 'start') {
+        return {
+          bet: Number(q('bet').value || 25),
+          seed: Number(Date.now() % 1000000),
+        };
+      }
+      return {};
+    };
+
+    const sendWalletAction = async (action) => {
+      requireWallet();
+      const payload = actionPayload(action);
+      const built = await call('/api/build-wallet-action', { action, ...payload });
+      if (!built?.txBase64) throw new Error(`missing tx for ${action}`);
+      const tx = txFromBase64(built.txBase64);
+      const sent = await sendAndConfirm(tx);
+      return call('/api/commit-wallet-action', { action, signature: sent.signature, confirmedSlot: sent.confirmedSlot, ...payload });
+    };
+
+    const gameInitialized = () => {
+      const table = currentState?.table || {};
+      const player = currentState?.player || {};
+      return Number(table.minBet || 0) > 0 && Number(player.chips || 0) > 0;
+    };
+    const inRound = () => Boolean(currentState?.player?.inRound);
+
+    const updateResultBanner = () => {
+      const outcome = Number(currentState?.player?.outcome || 0);
+      const showingRoundEnd = !inRound() && [2, 3, 4, 5, 6].includes(outcome);
+      if (!showingRoundEnd) {
+        resultBannerEl.style.display = 'none';
+        resultBannerEl.className = 'result-banner';
+        resultBannerEl.textContent = '';
+        return;
+      }
+      let text = '';
+      let cls = 'result-banner';
+      if (outcome === 4 || outcome === 3) {
+        text = 'You win this hand.';
+        cls += ' result-win';
+      } else if (outcome === 5 || outcome === 2) {
+        text = 'Dealer wins this hand.';
+        cls += ' result-lose';
+      } else {
+        text = 'Push. Bet returned.';
+        cls += ' result-push';
+      }
+      resultBannerEl.className = cls;
+      resultBannerEl.textContent = text;
+      resultBannerEl.style.display = 'block';
+    };
+
+    const updateActionButtons = () => {
+      const connected = Boolean(walletAddress);
+      const initialized = gameInitialized();
+      const activeRound = inRound();
+
+      startBtn.disabled = inFlight || !connected || activeRound;
+      hitBtn.disabled = inFlight || !connected || !initialized || !activeRound;
+      standBtn.disabled = inFlight || !connected || !initialized || !activeRound;
+      walletConnectBtn.disabled = inFlight;
+      walletDisconnectBtn.disabled = inFlight;
+      q('bet').disabled = inFlight || activeRound;
+    };
+
+    const dealHand = async () => {
+      if (!gameInitialized()) {
+        await sendWalletAction('init');
+      }
+      return sendWalletAction('start');
+    };
 
     function paintCards(state) {
       dealerCardsEl.innerHTML = '';
@@ -303,11 +439,8 @@
 
     function paint(body) {
       const state = body.state || {};
+      currentState = state;
       const player = state.player || {};
-
-      if (body.state) stateEl.textContent = JSON.stringify(body.state, null, 2);
-      if (body.lastAction !== undefined) actionEl.textContent = JSON.stringify(body.lastAction, null, 2);
-      if (body.addresses) addressesEl.textContent = JSON.stringify(body.addresses, null, 2);
 
       paintCards(state);
 
@@ -316,34 +449,66 @@
       playerTotalEl.textContent = `total: ${player.handTotal ?? 0}`;
 
       summaryEl.textContent = `chips: ${player.chips ?? 0} | bet: ${player.activeBet ?? 0} | outcome: ${outcomeLabel(player.outcome ?? 0)}`;
-      statusEl.textContent = body.message || 'ok';
+      statusEl.textContent = body.message || 'Ready to play';
+      updateResultBanner();
+      updateActionButtons();
     }
 
     async function action(fn) {
       try {
+        inFlight = true;
+        updateActionButtons();
         statusEl.textContent = 'processing...';
         const body = await fn();
         paint(body);
       } catch (err) {
         statusEl.textContent = String(err.message || err);
+      } finally {
+        inFlight = false;
+        updateActionButtons();
       }
     }
 
-    q('initBtn').onclick = () => action(() => call('/api/init', {
-      initialChips: Number(q('initialChips').value || 500),
-      minBet: 10,
-      maxBet: 100,
-      dealerSoft17Hits: true,
-    }));
+    q('startBtn').onclick = () => action(() => dealHand());
+    q('hitBtn').onclick = () => action(() => sendWalletAction('hit'));
+    q('standBtn').onclick = () => action(() => sendWalletAction('stand'));
 
-    q('startBtn').onclick = () => action(() => call('/api/start', {
-      bet: Number(q('bet').value || 25),
-      seed: Number(q('seed').value || Date.now() % 1000000),
-    }));
+    q('walletConnect').onclick = async () => {
+      try {
+        walletProvider = window?.phantom?.solana || window?.solana || null;
+        if (!walletProvider) throw new Error('Phantom extension not found.');
+        const res = await walletProvider.connect();
+        walletAddress = res?.publicKey?.toString() || '';
+        updateWalletUi();
+        await action(() => call('/api/state'));
+      } catch (err) {
+        statusEl.textContent = String(err.message || err);
+      }
+    };
 
-    q('hitBtn').onclick = () => action(() => call('/api/hit'));
-    q('standBtn').onclick = () => action(() => call('/api/stand'));
-    q('stateBtn').onclick = () => action(() => call('/api/state'));
+    q('walletDisconnect').onclick = async () => {
+      try {
+        if (walletProvider && walletAddress && walletProvider.disconnect) await walletProvider.disconnect();
+      } catch {}
+      walletAddress = '';
+      updateWalletUi();
+    };
+
+    (() => {
+      const p = window?.phantom?.solana || window?.solana || null;
+      if (p && p.isPhantom) {
+        walletProvider = p;
+        walletProvider.on?.('connect', () => {
+          walletAddress = walletProvider.publicKey?.toString() || '';
+          updateWalletUi();
+        });
+        walletProvider.on?.('disconnect', () => {
+          walletAddress = '';
+          updateWalletUi();
+        });
+      }
+      updateWalletUi();
+    })();
 
     action(() => call('/api/state'));
   </script>

@@ -1,0 +1,21 @@
+version = 1
+
+[[packages]]
+name = "5ive-blackjack"
+version = "0.0.0"
+address = "5Jg48d1vnZdvmQPryZtvENgK1QtqDQpvEarQ7tnSkq7T"
+bytecode_hash = "efb7a327fa28ba7c835cc463d91fb2a82267545153cc5e85949a21b591854771"
+deployed_at = "2026-03-14T08:24:05.167Z"
+
+  [packages.exports]
+  methods = [
+  "init_table",
+  "init_player",
+  "start_round",
+  "hit",
+  "stand_and_settle",
+  "get_player_chips",
+  "get_round_status",
+  "get_last_outcome"
+]
+  interfaces = [ ]

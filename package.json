@@ -31,7 +31,11 @@
     "verify": "npm run build && npm run test && npm run test:onchain:local && npm run client:run:local",
     "verify:networks": "npm run build && npm run test && npm run test:onchain:local && npm run test:onchain:devnet && npm run test:onchain:mainnet:preflight",
     "smoke": "npm run build && npm run test",
-    "smoke:onchain:local": "npm run build && npm run test:onchain:local"
+    "smoke:onchain:local": "npm run build && npm run test:onchain:local",
+    "web:install": "npm --prefix web install",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "web:start": "npm --prefix web run start"
   },
   "devDependencies": {
     "@5ive-tech/cli": "^1.0.0"
