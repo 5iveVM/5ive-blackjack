@@ -25,5 +25,9 @@ yarn-error.log*
 Thumbs.db
 
 # 5IVE VM
-.five/cache/
+.five/
 *.debug.bin
+
+# Local generated assets
+client/dist/
+*.v.debug
