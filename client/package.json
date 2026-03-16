@@ -10,13 +10,10 @@
     "test:localnet": "npm run build && node --test dist/tests/localnet.test.js",
     "test:journey:localnet": "npm run build && node --test dist/tests/user-journey.localnet.test.js",
     "test:webflow:localnet": "npm run build && node --test dist/tests/web-flow.localnet.test.js",
-    "test:gui:strict:localnet": "npm run build && node --test dist/tests/gui-server.strict.localnet.test.js",
-    "test:gui:builder:localnet": "npm run build && node --test dist/tests/gui-server.builder.localnet.test.js",
-    "journey:localnet": "npm run build && node dist/journey.localnet.js",
-    "gui:localnet": "npm run build && node dist/gui-server.js"
+    "journey:localnet": "npm run build && node dist/journey.localnet.js"
   },
   "dependencies": {
-    "@5ive-tech/sdk": "^1.1.7",
+    "@5ive-tech/sdk": "file:../../five-sdk",
     "@solana/web3.js": "^1.98.4"
   },
   "devDependencies": {

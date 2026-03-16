@@ -11,7 +11,6 @@
   "include": [
     "main.ts",
     "journey.localnet.ts",
-    "gui-server.ts",
     "src/**/*.ts",
     "tests/**/*.ts"
   ]

@@ -14,6 +14,7 @@ account PlayerState {
     dealer_total: u64;
     round_status: u64;
     outcome: u64;
+    session_nonce: u64;
     in_round: bool;
 }
 
@@ -114,6 +115,7 @@ pub init_player(
     player.dealer_total = 0;
     player.round_status = round_idle();
     player.outcome = round_idle();
+    player.session_nonce = 0;
     player.in_round = false;
 }
 
@@ -208,7 +210,7 @@ pub start_round(
 pub hit(
     player: PlayerState @mut,
     round: RoundState @mut,
-    owner: account @signer
+    owner: account @session
 ) {
     require(player.owner == owner.ctx.key);
     require(player.in_round);
@@ -234,13 +236,15 @@ pub hit(
         player.chips = player.chips - player.active_bet;
         player.in_round = false;
     }
+
+    player.session_nonce = player.session_nonce + 1;
 }
 
 pub stand_and_settle(
     table: BlackjackTable,
     player: PlayerState @mut,
     round: RoundState @mut,
-    owner: account @signer
+    owner: account @session
 ) {
     require(player.owner == owner.ctx.key);
     require(player.in_round);
@@ -292,6 +296,7 @@ pub stand_and_settle(
 
     player.in_round = false;
     player.active_bet = 0;
+    player.session_nonce = player.session_nonce + 1;
 }
 
 pub get_player_chips(player: PlayerState) -> u64 {

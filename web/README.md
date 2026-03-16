@@ -19,8 +19,14 @@ Then open `http://localhost:3000`.
 
 - This app is intentionally separate from `five-frontend`.
 - Use `NEXT_PUBLIC_RPC_URL` to target localnet/devnet/mainnet RPC.
-- The web UI now executes `init_table`, `init_player`, `start_round`, `hit`, and `stand_and_settle` with wallet signatures.
+- The web UI executes `init_table`, `init_player`, and `start_round` directly.
+- `hit`/`stand_and_settle` support both:
+  - delegated session flow (`Create Session`, then delegated signer + session sidecar), and
+  - direct owner flow (no active session required; implicit session accounts alias to owner).
 - If you do not set fixed table/player/round accounts in env, use the `Provision Accounts` button.
+- Session config env:
+  - `NEXT_PUBLIC_SESSION_MANAGER_SCRIPT_ACCOUNT` optional override for session manager script account.
+  - `NEXT_PUBLIC_SESSION_TTL_SLOTS` optional session lifetime in slots (default `3000`).
 
 ## Cloudflare Pages
 

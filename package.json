@@ -23,8 +23,6 @@
     "client:test:localnet": "npm run build && npm --prefix client install && npm --prefix client run test:localnet",
     "client:test:journey:localnet": "npm run build && npm --prefix client install && npm --prefix client run test:journey:localnet",
     "client:journey:localnet": "npm run build && npm --prefix client install && npm --prefix client run journey:localnet",
-    "client:gui:localnet": "npm run build && npm --prefix client install && npm --prefix client run gui:localnet",
-    "dev:localnet:blackjack": "bash scripts/dev-localnet-blackjack.sh",
     "client:run:local": "FIVE_NETWORK=localnet npm run client:run",
     "client:run:devnet": "FIVE_NETWORK=devnet npm run client:run",
     "client:run:mainnet": "FIVE_NETWORK=mainnet npm run client:run",

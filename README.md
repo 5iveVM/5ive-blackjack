@@ -13,7 +13,7 @@ Single-player blackjack on 5IVE VM using mock-chip wagers (MVP).
 ## Contract Accounts
 
 - `BlackjackTable`: table config and betting limits
-- `PlayerState`: player chips, active bet, totals, status/outcome
+- `PlayerState`: player chips, active bet, totals, status/outcome, delegated session nonce
 - `RoundState`: deterministic deck seed, cursor, draw metadata
 
 ## Public Functions
@@ -42,7 +42,6 @@ npm run test:onchain:local
 npm run client:run:local
 npm run client:test:journey:localnet
 npm run client:journey:localnet
-npm run client:gui:localnet
 
 # Devnet
 npm run test:onchain:devnet
@@ -78,6 +77,14 @@ Optional runtime env:
 - `FIVE_MIN_BET`, `FIVE_MAX_BET`
 - `FIVE_DEALER_SOFT17_HITS=1`
 - `FIVE_DO_HIT=0` to skip hit before settle
+- `FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT` optional override (defaults to canonical `session_v1` PDA)
+- `FIVE_SESSION_TTL_SLOTS` session lifetime in slots (default `3000`)
+
+Sessionized gameplay flow:
+1. Create session sidecar account and call `create_session`.
+2. Call delegated `hit` and/or `stand_and_settle`; the delegate key is passed in the `owner` slot and the compiler-injected `__session` account is auto-wired by the client/sdk.
+3. Increment `player.session_nonce` in program logic each delegated action.
+4. Revoke with `revoke_session` when done (web UI includes this control).
 
 ## Notes
 
@@ -85,7 +92,7 @@ Optional runtime env:
 - Payout is even-money (`1x`) for wins.
 - No split, double down, insurance, or surrender in v1.
 
-## Localnet Journey + GUI Prereqs
+## Localnet Journey Prereqs
 
 - local validator running at `http://127.0.0.1:8899`
 - Five VM program deployed locally (or set `FIVE_VM_PROGRAM_ID` to the deployed address)
