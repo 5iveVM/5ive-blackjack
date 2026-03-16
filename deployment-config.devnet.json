@@ -2,7 +2,7 @@
   "network": "devnet",
   "rpcUrl": "https://api.devnet.solana.com",
   "fiveProgramId": "5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst",
-  "vmStatePda": "<SET_AFTER_VM_INIT>",
-  "blackjackScriptAccount": "<SET_AFTER_BLACKJACK_DEPLOY>",
-  "updatedAt": "2026-03-11T00:00:00Z"
+  "vmStatePda": "8E3GiPZUeB4R4gdkkYPNKoHywZxmmaEs4h3PhjoSsjzX",
+  "blackjackScriptAccount": "FQRZ7GLSxs466DeUii8rVHe24WzZarSsW91tzV6uhxuY",
+  "updatedAt": "2026-03-16T20:45:08Z"
 }

@@ -132,6 +132,15 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+function readU64Le(bytes: Uint8Array, offset: number): bigint {
+  if (bytes.length < offset + 8) throw new Error("account data too short for u64 read");
+  let value = 0n;
+  for (let i = 0; i < 8; i += 1) {
+    value |= BigInt(bytes[offset + i]) << BigInt(i * 8);
+  }
+  return value;
+}
+
 function parseEnvAccounts(): GameAccounts | null {
   const table = process.env.NEXT_PUBLIC_BJ_TABLE_ACCOUNT || "";
   const player = process.env.NEXT_PUBLIC_BJ_PLAYER_ACCOUNT || "";
@@ -438,22 +447,18 @@ export default function Home() {
     const ownerForSessionizedAction = delegatedSession
       ? sessionState!.delegate!.publicKey.toBase58()
       : walletPk;
+    const sessionForSessionizedAction = delegatedSession
+      ? sessionState!.sessionAccount!.publicKey.toBase58()
+      : walletPk;
     const vmPayer = delegatedSession ? ownerForSessionizedAction : walletPk;
-    if (functionName === "hit" || functionName === "stand_and_settle") {
-      if (delegatedSession) {
-        program = program.withSession({
-          mode: "auto",
-          manager: { defaultTtlSlots: SESSION_TTL_SLOTS } as any,
-          sessionAccountByFunction: {
-            [functionName]: sessionState!.sessionAccount!.publicKey.toBase58(),
-          },
-        });
-      } else {
-        program = program.withSession({
-          mode: "force-direct",
-          manager: { defaultTtlSlots: SESSION_TTL_SLOTS } as any,
-        });
-      }
+    if ((functionName === "hit" || functionName === "stand_and_settle") && delegatedSession) {
+      program = program.withSession({
+        mode: "auto",
+        manager: { defaultTtlSlots: SESSION_TTL_SLOTS } as any,
+        sessionAccountByFunction: {
+          [functionName]: sessionState!.sessionAccount!.publicKey.toBase58(),
+        },
+      });
     }
 
     const accountMapByFunction: Record<string, Record<string, string>> = {
@@ -464,12 +469,14 @@ export default function Home() {
         player: resolved.player,
         round: resolved.round,
         owner: ownerForSessionizedAction,
+        __session: sessionForSessionizedAction,
       },
       stand_and_settle: {
         table: resolved.table,
         player: resolved.player,
         round: resolved.round,
         owner: ownerForSessionizedAction,
+        __session: sessionForSessionizedAction,
       },
     };
 
@@ -589,12 +596,23 @@ export default function Home() {
     const slot = await connection.getSlot("confirmed");
     const expiresAtSlot = slot + Math.max(1, SESSION_TTL_SLOTS);
 
+    let syncedNonce = session.nonce;
+    try {
+      const playerInfo = await connection.getAccountInfo(new PublicKey(resolved.player), "confirmed");
+      if (playerInfo?.data) {
+        // PlayerState layout stores session_nonce as u64 LE at byte offset 80.
+        syncedNonce = Number(readU64Le(playerInfo.data, 80));
+      }
+    } catch {
+      // Keep local nonce fallback if account read fails.
+    }
+
     const lamports = await connection.getMinimumBalanceForRentExemption(SESSION_ACCOUNT_SPACE);
     const sessionDraft: SessionState = {
       delegate,
       sessionAccount,
       status: "unknown",
-      nonce: session.nonce,
+      nonce: syncedNonce,
       expiresAtSlot,
       managerScriptAccount,
     };
@@ -623,7 +641,7 @@ export default function Home() {
         expires_at_slot: expiresAtSlot,
         scope_hash: SESSION_SCOPE_HASH,
         bind_account: resolved.player,
-        nonce: session.nonce,
+        nonce: syncedNonce,
         manager_script_account: managerScriptAccount,
         manager_code_hash: "11111111111111111111111111111111",
         manager_version: 1,
@@ -639,7 +657,7 @@ export default function Home() {
       delegate,
       sessionAccount,
       status: "active",
-      nonce: session.nonce,
+      nonce: syncedNonce,
       expiresAtSlot,
       managerScriptAccount,
     });
