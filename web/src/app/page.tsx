@@ -20,6 +20,15 @@ type GameAccounts = {
   round: string;
 };
 
+type SessionState = {
+  delegate: Keypair | null;
+  sessionAccount: Keypair | null;
+  status: "unknown" | "active" | "revoked" | "expired";
+  nonce: number;
+  expiresAtSlot: number | null;
+  managerScriptAccount: string;
+};
+
 type GameState = {
   chips: number;
   activeBet: number;
@@ -49,11 +58,72 @@ const ROUND_DEALER_BUST = 3;
 const ROUND_PLAYER_WIN = 4;
 const ROUND_DEALER_WIN = 5;
 const ROUND_PUSH = 6;
+const SESSION_ACCOUNT_SPACE = 256;
+const SESSION_TTL_SLOTS = Number(process.env.NEXT_PUBLIC_SESSION_TTL_SLOTS || "3000");
+const SESSION_DELEGATE_MIN_FEE_LAMPORTS = 500_000;
+const SESSION_DELEGATE_TOPUP_LAMPORTS = 2_000_000;
+
+function scopeHashForFunctions(functions: string[]): string {
+  const sorted = [...functions].sort();
+  let acc = 0n;
+  const mask = (1n << 64n) - 1n;
+  for (const ch of sorted.join("|")) {
+    acc = (acc * 131n + BigInt(ch.charCodeAt(0))) & mask;
+  }
+  return acc.toString();
+}
+
+function canonicalSessionManagerScriptAccount(vmProgramId: string): string {
+  const [scriptPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("session_v1", "utf-8")],
+    new PublicKey(vmProgramId)
+  );
+  return scriptPda.toBase58();
+}
+
+const SESSION_SCOPE_HASH = scopeHashForFunctions(["hit", "stand_and_settle"]);
 
 const DEFAULT_VM_PROGRAM_ID =
-  process.env.NEXT_PUBLIC_FIVE_VM_PROGRAM_ID || "5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst";
+  process.env.NEXT_PUBLIC_FIVE_VM_PROGRAM_ID || "2DXiYbzfSMwkDSxc9aWEaW7XgJjkNzGdADfRN4FbxMNN";
 const DEFAULT_SCRIPT_ACCOUNT = process.env.NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT || "";
 const DEFAULT_RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || "";
+
+const SESSION_MANAGER_ABI = {
+  name: "SessionManager",
+  functions: [
+    {
+      name: "create_session",
+      index: 0,
+      parameters: [
+        { name: "session", type: "Account", is_account: true, attributes: ["mut"] },
+        { name: "authority", type: "Account", is_account: true, attributes: ["signer"] },
+        { name: "delegate", type: "Account", is_account: true, attributes: [] },
+        { name: "target_program", type: "pubkey", is_account: false, attributes: [] },
+        { name: "expires_at_slot", type: "u64", is_account: false, attributes: [] },
+        { name: "scope_hash", type: "u64", is_account: false, attributes: [] },
+        { name: "bind_account", type: "pubkey", is_account: false, attributes: [] },
+        { name: "nonce", type: "u64", is_account: false, attributes: [] },
+        { name: "manager_script_account", type: "pubkey", is_account: false, attributes: [] },
+        { name: "manager_code_hash", type: "pubkey", is_account: false, attributes: [] },
+        { name: "manager_version", type: "u8", is_account: false, attributes: [] },
+      ],
+      return_type: null,
+      is_public: true,
+      bytecode_offset: 0,
+    },
+    {
+      name: "revoke_session",
+      index: 1,
+      parameters: [
+        { name: "session", type: "Account", is_account: true, attributes: ["mut"] },
+        { name: "authority", type: "Account", is_account: true, attributes: ["signer"] },
+      ],
+      return_type: null,
+      is_public: true,
+      bytecode_offset: 0,
+    },
+  ],
+} as const;
 
 function decodeBase64ToBytes(base64: string): Uint8Array {
   const raw = atob(base64);
@@ -77,6 +147,10 @@ async function loadProgram(scriptAccount: string, vmProgramId: string) {
   });
   const loaded = await FiveSDK.loadFiveFile(artifactText);
   return FiveProgram.fromABI(scriptAccount, loaded.abi, { fiveVMProgramId: vmProgramId });
+}
+
+function isDelegatedSessionActive(sessionState?: SessionState): boolean {
+  return !!sessionState?.delegate && !!sessionState?.sessionAccount && sessionState.status === "active";
 }
 
 const CONFIRM_OPTS: ConfirmOptions = {
@@ -189,6 +263,14 @@ export default function Home() {
   const [accounts, setAccounts] = useState<GameAccounts | null>(parseEnvAccounts());
   const [sigs, setSigs] = useState<string[]>([]);
   const [state, setState] = useState<GameState>(initialState());
+  const [session, setSession] = useState<SessionState>({
+    delegate: null,
+    sessionAccount: null,
+    status: "unknown",
+    nonce: 0,
+    expiresAtSlot: null,
+    managerScriptAccount: "",
+  });
 
   const vmProgramId = useMemo(() => DEFAULT_VM_PROGRAM_ID, []);
   const scriptAccount = useMemo(() => DEFAULT_SCRIPT_ACCOUNT, []);
@@ -224,15 +306,28 @@ export default function Home() {
     return String(err);
   };
 
-  async function sendAndConfirm(tx: Transaction, extraSigners: Keypair[] = []) {
-    if (!wallet.publicKey) throw new Error("Connect wallet first.");
-    tx.feePayer = wallet.publicKey;
+  function resolveSessionManagerScriptAccount(): string {
+    const explicit = process.env.NEXT_PUBLIC_SESSION_MANAGER_SCRIPT_ACCOUNT || "";
+    if (explicit) return explicit;
+    return canonicalSessionManagerScriptAccount(vmProgramId);
+  }
+
+  async function sendAndConfirm(
+    tx: Transaction,
+    extraSigners: Keypair[] = [],
+    options?: { feePayer?: PublicKey; requireWalletSignature?: boolean }
+  ) {
+    if (!wallet.publicKey && !options?.feePayer) throw new Error("Connect wallet first.");
+    tx.feePayer = options?.feePayer || wallet.publicKey || undefined;
     const latest = await connection.getLatestBlockhash("confirmed");
     tx.recentBlockhash = latest.blockhash;
     if (extraSigners.length > 0) tx.partialSign(...extraSigners);
     let sig = "";
     try {
-      if (wallet.signTransaction) {
+      const requireWalletSignature = options?.requireWalletSignature ?? true;
+      if (!requireWalletSignature) {
+        sig = await connection.sendRawTransaction(tx.serialize(), { ...CONFIRM_OPTS, maxRetries: 3 });
+      } else if (wallet.signTransaction) {
         const signed = await wallet.signTransaction(tx);
         sig = await connection.sendRawTransaction(signed.serialize(), { ...CONFIRM_OPTS, maxRetries: 3 });
       } else if (wallet.sendTransaction) {
@@ -280,62 +375,12 @@ export default function Home() {
     return next;
   }
 
-  async function buildInstruction(
-    functionName: "init_table" | "init_player" | "start_round" | "hit" | "stand_and_settle",
-    args: Record<string, unknown>,
-    resolved: GameAccounts
-  ): Promise<TransactionInstruction> {
-    if (!wallet.publicKey) throw new Error("Connect wallet first.");
-    if (!scriptAccount) throw new Error("Set NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT in web/.env.local.");
-
-    const program = await loadProgram(scriptAccount, vmProgramId);
-    const walletPk = wallet.publicKey.toBase58();
-
-    const accountMapByFunction: Record<string, Record<string, string>> = {
-      init_table: { table: resolved.table, authority: walletPk },
-      init_player: { player: resolved.player, owner: walletPk },
-      start_round: { table: resolved.table, player: resolved.player, round: resolved.round, owner: walletPk },
-      hit: { player: resolved.player, round: resolved.round, owner: walletPk },
-      stand_and_settle: { table: resolved.table, player: resolved.player, round: resolved.round, owner: walletPk },
-    };
-
-    let builder = program
-      .function(functionName)
-      .payer(walletPk)
-      .accounts(accountMapByFunction[functionName]);
-    if (Object.keys(args).length > 0) builder = builder.args(args);
-    const encoded = await builder.instruction();
-
-    const ix = new TransactionInstruction({
-      programId: new PublicKey(encoded.programId),
-      keys: encoded.keys.map((k: { pubkey: string; isSigner: boolean; isWritable: boolean }) => ({
-        pubkey: new PublicKey(k.pubkey),
-        isSigner: k.isSigner,
-        isWritable: k.isWritable,
-      })),
-      data: Buffer.from(decodeBase64ToBytes(encoded.data)),
-    });
-
-    return ix;
-  }
-
-  async function callAction(functionName: "start_round" | "hit" | "stand_and_settle", args: Record<string, unknown>) {
-    const resolved = accounts || (await provisionAccounts());
-    try {
-      const ix = await buildInstruction(functionName, args, resolved);
-      await sendAndConfirm(new Transaction().add(ix));
-    } catch (err) {
-      throw new Error(`action ${functionName} failed: ${errText(err)}`);
-    }
-  }
-
-  async function setupAndDeal(seed: number, wager: number) {
+  async function ensureInitialized(): Promise<GameAccounts> {
     if (!wallet.publicKey) throw new Error("Connect wallet first.");
     let resolved = accounts;
     let setupSigners: Keypair[] = [];
     let setupTx = new Transaction();
 
-    // If accounts are not provisioned yet, create them in TX 1 (same tx as init instructions).
     if (!resolved) {
       const owner = new PublicKey(vmProgramId);
       const table = Keypair.generate();
@@ -360,24 +405,255 @@ export default function Home() {
       setAccounts(resolved);
     }
 
-    // TX 1: provision (if needed) + init_table + init_player
-    const initTableIx = await buildInstruction(
-      "init_table",
-      {
-        min_bet: state.minBet,
-        max_bet: state.maxBet,
-        dealer_soft17_hits: state.dealerSoft17Hits,
-      },
-      resolved
-    );
-    const initPlayerIx = await buildInstruction("init_player", { initial_chips: 500 }, resolved);
-    try {
+    if (!state.setupDone) {
+      const initTableIx = await buildInstruction(
+        "init_table",
+        {
+          min_bet: state.minBet,
+          max_bet: state.maxBet,
+          dealer_soft17_hits: state.dealerSoft17Hits,
+        },
+        resolved
+      );
+      const initPlayerIx = await buildInstruction("init_player", { initial_chips: 500 }, resolved);
       await sendAndConfirm(setupTx.add(initTableIx, initPlayerIx), setupSigners);
-    } catch (err) {
-      throw new Error(`setup tx1(provision+init_table+init_player) failed: ${errText(err)}`);
+      applyInit();
     }
 
-    // TX 2: start_round
+    return resolved;
+  }
+
+  async function buildInstruction(
+    functionName: "init_table" | "init_player" | "start_round" | "hit" | "stand_and_settle",
+    args: Record<string, unknown>,
+    resolved: GameAccounts,
+    sessionState?: SessionState
+  ): Promise<TransactionInstruction> {
+    if (!wallet.publicKey) throw new Error("Connect wallet first.");
+    if (!scriptAccount) throw new Error("Set NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT in web/.env.local.");
+
+    let program = await loadProgram(scriptAccount, vmProgramId);
+    const walletPk = wallet.publicKey.toBase58();
+    const delegatedSession = isDelegatedSessionActive(sessionState);
+    const ownerForSessionizedAction = delegatedSession
+      ? sessionState!.delegate!.publicKey.toBase58()
+      : walletPk;
+    const vmPayer = delegatedSession ? ownerForSessionizedAction : walletPk;
+    if (functionName === "hit" || functionName === "stand_and_settle") {
+      if (delegatedSession) {
+        program = program.withSession({
+          mode: "auto",
+          manager: { defaultTtlSlots: SESSION_TTL_SLOTS } as any,
+          sessionAccountByFunction: {
+            [functionName]: sessionState!.sessionAccount!.publicKey.toBase58(),
+          },
+        });
+      } else {
+        program = program.withSession({
+          mode: "force-direct",
+          manager: { defaultTtlSlots: SESSION_TTL_SLOTS } as any,
+        });
+      }
+    }
+
+    const accountMapByFunction: Record<string, Record<string, string>> = {
+      init_table: { table: resolved.table, authority: walletPk },
+      init_player: { player: resolved.player, owner: walletPk },
+      start_round: { table: resolved.table, player: resolved.player, round: resolved.round, owner: walletPk },
+      hit: {
+        player: resolved.player,
+        round: resolved.round,
+        owner: ownerForSessionizedAction,
+      },
+      stand_and_settle: {
+        table: resolved.table,
+        player: resolved.player,
+        round: resolved.round,
+        owner: ownerForSessionizedAction,
+      },
+    };
+
+    let builder = program
+      .function(functionName)
+      .payer(vmPayer)
+      .accounts(accountMapByFunction[functionName]);
+    if (Object.keys(args).length > 0) builder = builder.args(args);
+    const encoded = await builder.instruction();
+
+    const ix = new TransactionInstruction({
+      programId: new PublicKey(encoded.programId),
+      keys: encoded.keys.map((k: { pubkey: string; isSigner: boolean; isWritable: boolean }) => ({
+        pubkey: new PublicKey(k.pubkey),
+        isSigner: k.isSigner,
+        isWritable: k.isWritable,
+      })),
+      data: Buffer.from(decodeBase64ToBytes(encoded.data)),
+    });
+
+    return ix;
+  }
+
+  async function buildSessionInstruction(
+    functionName: "create_session" | "revoke_session",
+    args: Record<string, unknown>,
+    sessionState: SessionState
+  ): Promise<TransactionInstruction> {
+    if (!wallet.publicKey) throw new Error("Connect wallet first.");
+    const managerScriptAccount = sessionState.managerScriptAccount || resolveSessionManagerScriptAccount();
+    const program = FiveProgram.fromABI(managerScriptAccount, SESSION_MANAGER_ABI as any, {
+      fiveVMProgramId: vmProgramId,
+    });
+    const walletPk = wallet.publicKey.toBase58();
+
+    const accountMapByFunction: Record<string, Record<string, string>> = {
+      create_session: {
+        session: sessionState.sessionAccount?.publicKey.toBase58() || "",
+        authority: walletPk,
+        delegate: sessionState.delegate?.publicKey.toBase58() || "",
+      },
+      revoke_session: {
+        session: sessionState.sessionAccount?.publicKey.toBase58() || "",
+        authority: walletPk,
+      },
+    };
+
+    let builder = program
+      .function(functionName)
+      .payer(walletPk)
+      .accounts(accountMapByFunction[functionName]);
+    if (Object.keys(args).length > 0) builder = builder.args(args);
+
+    const encoded = await builder.instruction();
+    return new TransactionInstruction({
+      programId: new PublicKey(encoded.programId),
+      keys: encoded.keys.map((k: { pubkey: string; isSigner: boolean; isWritable: boolean }) => ({
+        pubkey: new PublicKey(k.pubkey),
+        isSigner: k.isSigner,
+        isWritable: k.isWritable,
+      })),
+      data: Buffer.from(decodeBase64ToBytes(encoded.data)),
+    });
+  }
+
+  async function callAction(functionName: "start_round" | "hit" | "stand_and_settle", args: Record<string, unknown>) {
+    const resolved = await ensureInitialized();
+    const sessionized = functionName === "hit" || functionName === "stand_and_settle";
+
+    let extraSigners: Keypair[] = [];
+    let mergedArgs = { ...args };
+    let sessionForInstruction: SessionState | undefined;
+    let txFeePayer: PublicKey | undefined;
+    let requireWalletSignature = true;
+    if (sessionized) {
+      const delegatedReady =
+        session.status === "active" && !!session.delegate && !!session.sessionAccount;
+      if (delegatedReady) {
+        const currentSlot = await connection.getSlot("confirmed");
+        if (session.expiresAtSlot && currentSlot > session.expiresAtSlot) {
+          setSession((prev) => ({ ...prev, status: "expired" }));
+        } else {
+          sessionForInstruction = session;
+          extraSigners = [session.delegate as Keypair];
+          txFeePayer = session.delegate!.publicKey;
+          requireWalletSignature = false;
+        }
+      }
+      mergedArgs = { ...mergedArgs };
+    }
+
+    try {
+      const ix = await buildInstruction(functionName, mergedArgs, resolved, sessionForInstruction);
+      await sendAndConfirm(new Transaction().add(ix), extraSigners, {
+        feePayer: txFeePayer,
+        requireWalletSignature,
+      });
+      if (sessionized) {
+        // PlayerState.session_nonce advances on-chain for hit/stand in both
+        // direct-owner and delegated-session paths; keep local nonce in sync.
+        setSession((prev) => ({ ...prev, nonce: prev.nonce + 1 }));
+      }
+    } catch (err) {
+      throw new Error(`action ${functionName} failed: ${errText(err)}`);
+    }
+  }
+
+  async function createSession() {
+    if (!wallet.publicKey) throw new Error("Connect wallet first.");
+    if (!scriptAccount) throw new Error("Set NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT in web/.env.local.");
+    const resolved = await ensureInitialized();
+
+    const owner = new PublicKey(vmProgramId);
+    const delegate = session.delegate || Keypair.generate();
+    const sessionAccount = Keypair.generate();
+    const managerScriptAccount = resolveSessionManagerScriptAccount();
+    const slot = await connection.getSlot("confirmed");
+    const expiresAtSlot = slot + Math.max(1, SESSION_TTL_SLOTS);
+
+    const lamports = await connection.getMinimumBalanceForRentExemption(SESSION_ACCOUNT_SPACE);
+    const sessionDraft: SessionState = {
+      delegate,
+      sessionAccount,
+      status: "unknown",
+      nonce: session.nonce,
+      expiresAtSlot,
+      managerScriptAccount,
+    };
+
+    const createIx = SystemProgram.createAccount({
+      fromPubkey: wallet.publicKey,
+      newAccountPubkey: sessionAccount.publicKey,
+      lamports,
+      space: SESSION_ACCOUNT_SPACE,
+      programId: owner,
+    });
+    const delegateBalance = await connection.getBalance(delegate.publicKey, "confirmed");
+    const topupIx =
+      delegateBalance >= SESSION_DELEGATE_MIN_FEE_LAMPORTS
+        ? null
+        : SystemProgram.transfer({
+            fromPubkey: wallet.publicKey,
+            toPubkey: delegate.publicKey,
+            lamports: SESSION_DELEGATE_TOPUP_LAMPORTS,
+          });
+
+    const initSessionIx = await buildSessionInstruction(
+      "create_session",
+      {
+        target_program: scriptAccount,
+        expires_at_slot: expiresAtSlot,
+        scope_hash: SESSION_SCOPE_HASH,
+        bind_account: resolved.player,
+        nonce: session.nonce,
+        manager_script_account: managerScriptAccount,
+        manager_code_hash: "11111111111111111111111111111111",
+        manager_version: 1,
+      },
+      sessionDraft
+    );
+
+    const tx = new Transaction().add(createIx);
+    if (topupIx) tx.add(topupIx);
+    tx.add(initSessionIx);
+    await sendAndConfirm(tx, [sessionAccount]);
+    setSession({
+      delegate,
+      sessionAccount,
+      status: "active",
+      nonce: session.nonce,
+      expiresAtSlot,
+      managerScriptAccount,
+    });
+  }
+
+  async function revokeSession() {
+    if (!session.sessionAccount) throw new Error("No session to revoke.");
+    const revokeIx = await buildSessionInstruction("revoke_session", {}, session);
+    await sendAndConfirm(new Transaction().add(revokeIx));
+    setSession((prev) => ({ ...prev, status: "revoked" }));
+  }
+
+  async function setupAndDeal(seed: number, wager: number) {
+    const resolved = await ensureInitialized();
     const startRoundIx = await buildInstruction("start_round", { bet: wager, seed }, resolved);
     try {
       await sendAndConfirm(new Transaction().add(startRoundIx));
@@ -524,34 +800,23 @@ export default function Home() {
     }
   }
 
-  async function ensureSetup(): Promise<void> {
-    if (state.setupDone) return;
-    setStatus("setup...");
-    await setupAndDeal(0, 0);
-    applyInit();
-    setStatus("setup complete");
-  }
-
   const canDeal = walletConnected && !busy && !state.inRound;
   const canHit = walletConnected && !busy && state.inRound;
   const canStand = walletConnected && !busy && state.inRound;
+  const canCreateSession = walletConnected && !busy && !!scriptAccount;
+  const canRevokeSession = walletConnected && !busy && session.status === "active" && !!session.sessionAccount;
   const dealerDisplayTotal = state.dealerReveal ? state.dealerTotal : "?";
   const banner = !state.inRound ? outcomeBanner(state.outcome) : null;
 
   return (
     <div className="min-h-screen relative overflow-hidden flex flex-col bg-emerald-950">
       <Navbar />
-      
-      {/* Table Texture Background */}
+
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_rgba(16,185,129,0.15)_0%,_rgba(2,44,34,1)_100%)] pointer-events-none z-0" />
       <div className="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/black-paper.png')] pointer-events-none mix-blend-overlay z-0" />
-      
-      {/* Soft Lighting Rings */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-emerald-400/5 rounded-full blur-[100px] pointer-events-none z-0" />
 
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 md:px-8 pt-24 pb-8 relative z-10 flex flex-col">
-        
-        {/* Header HUD */}
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-emerald-100/70 border-b border-emerald-500/20 pb-4">
           <div>
             <h1 className="text-xl md:text-2xl font-black tracking-widest uppercase text-transparent bg-clip-text bg-gradient-to-r from-emerald-200 to-teal-400 drop-shadow-md">
@@ -571,95 +836,87 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Central Poker Table Play Area */}
         <div className="flex-1 relative flex flex-col justify-between py-8">
-          
-          {/* DEALER ZONE (Top) */}
           <div className="flex flex-col items-center">
-             <div className="mb-2 w-full max-w-md flex items-center gap-4">
-                <div className="h-px bg-emerald-500/20 flex-1" />
-                <div className="text-center">
-                  <span className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-200/50 block">Dealer</span>
-                  <span className="text-lg font-mono text-emerald-100">{dealerDisplayTotal}</span>
-                </div>
-                <div className="h-px bg-emerald-500/20 flex-1" />
-             </div>
-             
-             <div className="flex justify-center -space-x-10 perspective-1000 min-h-36 py-2 px-8">
-                {state.dealerCards.length === 0 && (
-                  <div className="w-20 h-28 rounded-xl border border-dashed border-emerald-500/20 flex items-center justify-center opacity-30">
-                     <span className="text-[10px] uppercase font-bold text-emerald-200">Empty</span>
-                  </div>
-                )}
-                {state.dealerCards.map((rank, idx) => {
-                  const hidden = !state.dealerReveal && idx === 1;
-                  const suit = suitFor(idx, state.deckSeed + 29);
-                  return (
-                    <PlayingCard
-                      key={`d-${idx}`}
-                      index={idx}
-                      hidden={hidden}
-                      rankLabel={rankLabel(rank)}
-                      suitLabel={suit}
-                    />
-                  );
-                })}
+            <div className="mb-2 w-full max-w-md flex items-center gap-4">
+              <div className="h-px bg-emerald-500/20 flex-1" />
+              <div className="text-center">
+                <span className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-200/50 block">Dealer</span>
+                <span className="text-lg font-mono text-emerald-100">{dealerDisplayTotal}</span>
               </div>
-          </div>
+              <div className="h-px bg-emerald-500/20 flex-1" />
+            </div>
 
-          {/* TABLE CENTER: Rules & Banner */}
-          <div className="flex flex-col items-center justify-center my-8">
-             <div className="text-center opacity-30 pointer-events-none select-none mb-6">
-               <h2 className="text-3xl font-black uppercase tracking-[0.3em] text-emerald-100">Blackjack</h2>
-               <p className="text-sm font-bold tracking-[0.4em] text-emerald-200">Pays 3 to 2</p>
-               <p className="text-[10px] uppercase tracking-widest text-emerald-300/60 mt-2">Dealer Must Draw to 16 and Stand on All 17s</p>
-             </div>
-             
-             {/* Outcome Banner */}
-             {banner && (
-                <div className={`mt-4 rounded-full border px-6 py-2 text-sm font-bold tracking-widest uppercase shadow-[0_0_30px_rgba(0,0,0,0.5)] backdrop-blur-md ${banner.cls}`}>
-                  {banner.text}
+            <div className="flex justify-center -space-x-10 perspective-1000 min-h-36 py-2 px-8">
+              {state.dealerCards.length === 0 && (
+                <div className="w-20 h-28 rounded-xl border border-dashed border-emerald-500/20 flex items-center justify-center opacity-30">
+                  <span className="text-[10px] uppercase font-bold text-emerald-200">Empty</span>
                 </div>
               )}
+              {state.dealerCards.map((rank, idx) => {
+                const hidden = !state.dealerReveal && idx === 1;
+                const suit = suitFor(idx, state.deckSeed + 29);
+                return (
+                  <PlayingCard
+                    key={`d-${idx}`}
+                    index={idx}
+                    hidden={hidden}
+                    rankLabel={rankLabel(rank)}
+                    suitLabel={suit}
+                  />
+                );
+              })}
+            </div>
           </div>
 
-          {/* PLAYER ZONE (Bottom) */}
-          <div className="flex flex-col items-center">
-             <div className="flex justify-center -space-x-10 perspective-1000 min-h-36 py-2 px-8 z-10">
-                {state.playerCards.length === 0 && (
-                  <div className="w-20 h-28 rounded-xl border border-dashed border-emerald-500/20 flex items-center justify-center opacity-30">
-                     <span className="text-[10px] uppercase font-bold text-emerald-200">Empty</span>
-                  </div>
-                )}
-                {state.playerCards.map((rank, idx) => {
-                  const suit = suitFor(idx, state.deckSeed + 11);
-                  return (
-                    <PlayingCard
-                      key={`p-${idx}`}
-                      index={idx}
-                      hidden={false}
-                      rankLabel={rankLabel(rank)}
-                      suitLabel={suit}
-                    />
-                  );
-                })}
+          <div className="flex flex-col items-center justify-center my-8">
+            <div className="text-center opacity-30 pointer-events-none select-none mb-6">
+              <h2 className="text-3xl font-black uppercase tracking-[0.3em] text-emerald-100">Blackjack</h2>
+              <p className="text-sm font-bold tracking-[0.4em] text-emerald-200">Pays 3 to 2</p>
+              <p className="text-[10px] uppercase tracking-widest text-emerald-300/60 mt-2">Dealer Must Draw to 16 and Stand on All 17s</p>
+            </div>
+
+            {banner && (
+              <div className={`mt-4 rounded-full border px-6 py-2 text-sm font-bold tracking-widest uppercase shadow-[0_0_30px_rgba(0,0,0,0.5)] backdrop-blur-md ${banner.cls}`}>
+                {banner.text}
               </div>
-              
-              <div className="mt-4 w-full max-w-md flex items-center gap-4">
-                <div className="h-px bg-emerald-500/20 flex-1" />
-                <div className="text-center">
-                  <span className="text-lg font-mono text-emerald-100">{state.playerTotal}</span>
-                  <span className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-200/50 block">Player 1</span>
+            )}
+          </div>
+
+          <div className="flex flex-col items-center">
+            <div className="flex justify-center -space-x-10 perspective-1000 min-h-36 py-2 px-8 z-10">
+              {state.playerCards.length === 0 && (
+                <div className="w-20 h-28 rounded-xl border border-dashed border-emerald-500/20 flex items-center justify-center opacity-30">
+                  <span className="text-[10px] uppercase font-bold text-emerald-200">Empty</span>
                 </div>
-                <div className="h-px bg-emerald-500/20 flex-1" />
-             </div>
+              )}
+              {state.playerCards.map((rank, idx) => {
+                const suit = suitFor(idx, state.deckSeed + 11);
+                return (
+                  <PlayingCard
+                    key={`p-${idx}`}
+                    index={idx}
+                    hidden={false}
+                    rankLabel={rankLabel(rank)}
+                    suitLabel={suit}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="mt-4 w-full max-w-md flex items-center gap-4">
+              <div className="h-px bg-emerald-500/20 flex-1" />
+              <div className="text-center">
+                <span className="text-lg font-mono text-emerald-100">{state.playerTotal}</span>
+                <span className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-200/50 block">Player 1</span>
+              </div>
+              <div className="h-px bg-emerald-500/20 flex-1" />
+            </div>
           </div>
         </div>
 
-        {/* BOTTOM ACTION BAR */}
-        <div className="mt-8 mx-auto w-full max-w-3xl rounded-3xl border border-white/5 bg-black/40 backdrop-blur-xl p-4 md:p-6 shadow-[0_20px_50px_rgba(0,0,0,0.5)] flex flex-col md:flex-row items-center justify-between gap-6 z-20">
-            
-            {/* Bet Controls */}
+        <div className="mt-8 mx-auto w-full max-w-5xl rounded-3xl border border-white/5 bg-black/40 backdrop-blur-xl p-4 md:p-6 shadow-[0_20px_50px_rgba(0,0,0,0.5)] flex flex-col gap-4 z-20">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
             <div className="flex items-center gap-3">
               <div className="flex flex-col">
                 <label className="text-[10px] uppercase font-bold tracking-widest text-slate-400 mb-1">Place Bet</label>
@@ -678,7 +935,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Main Actions */}
             <div className="flex items-center gap-3 w-full md:w-auto">
               <button
                 className="flex-1 md:flex-none rounded-xl bg-gradient-to-t from-emerald-600 to-emerald-400 px-8 py-3 text-sm font-black uppercase tracking-widest text-emerald-950 hover:from-emerald-500 hover:to-emerald-300 disabled:from-slate-800 disabled:to-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-lg active:scale-95"
@@ -687,68 +943,91 @@ export default function Home() {
                   runAction("deal", async () => {
                     const wager = Math.max(state.minBet, Math.min(state.maxBet, bet || 25));
                     const seed = Date.now() % 1_000_000;
-                    if (!state.setupDone) {
-                      await setupAndDeal(seed, wager);
-                      applyInit();
-                    } else {
-                      await callAction("start_round", { bet: wager, seed });
-                    }
+                    await setupAndDeal(seed, wager);
                     applyStartRound(seed, wager);
                   })
                 }
               >
                 Deal
               </button>
-              
-              <button 
-                className="flex-1 md:flex-none rounded-xl border border-white/10 bg-white/5 px-6 py-3 text-sm font-bold uppercase tracking-widest text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95" 
-                disabled={!canHit} 
+
+              <button
+                className="flex-1 md:flex-none rounded-xl border border-white/10 bg-white/5 px-6 py-3 text-sm font-bold uppercase tracking-widest text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
+                disabled={!canHit}
                 onClick={() => runAction("hit", async () => { await callAction("hit", {}); applyHit(); })}
               >
                 Hit
               </button>
-              
-              <button 
-                className="flex-1 md:flex-none rounded-xl border border-rose-500/30 bg-rose-500/10 px-6 py-3 text-sm font-bold uppercase tracking-widest text-rose-300 hover:bg-rose-500/20 hover:border-rose-500/50 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95" 
-                disabled={!canStand} 
+
+              <button
+                className="flex-1 md:flex-none rounded-xl border border-rose-500/30 bg-rose-500/10 px-6 py-3 text-sm font-bold uppercase tracking-widest text-rose-300 hover:bg-rose-500/20 hover:border-rose-500/50 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
+                disabled={!canStand}
                 onClick={() => runAction("stand", async () => { await callAction("stand_and_settle", {}); applyStand(); })}
               >
                 Stand
               </button>
             </div>
-            
+          </div>
+
+          <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3 text-xs font-mono text-emerald-100/80">
+            <div className="mb-2 uppercase tracking-widest text-emerald-300/70">Session Controls (Hit/Stand)</div>
+            <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-center">
+              <div className="space-y-1 break-all">
+                <div>status: {session.status}</div>
+                <div>nonce: {session.nonce}</div>
+                <div>scope_hash: {SESSION_SCOPE_HASH}</div>
+                <div>manager: {session.managerScriptAccount || resolveSessionManagerScriptAccount()}</div>
+                <div>delegate: {session.delegate?.publicKey.toBase58() || "unset"}</div>
+                <div>session: {session.sessionAccount?.publicKey.toBase58() || "unset"}</div>
+                <div>expires_at_slot: {session.expiresAtSlot ?? "unset"}</div>
+              </div>
+              <button
+                className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-xs font-bold uppercase tracking-wider text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
+                disabled={!canCreateSession}
+                onClick={() => runAction("create session", createSession)}
+              >
+                Create Session
+              </button>
+              <button
+                className="rounded-xl border border-rose-400/40 bg-rose-500/20 px-4 py-2 text-xs font-bold uppercase tracking-wider text-rose-100 hover:bg-rose-500/30 disabled:opacity-40"
+                disabled={!canRevokeSession}
+                onClick={() => runAction("revoke session", revokeSession)}
+              >
+                Revoke Session
+              </button>
+            </div>
+          </div>
         </div>
-        
-        {/* Debug Console Footer */}
+
         <div className="mt-6 flex flex-col md:flex-row justify-between text-[10px] font-mono text-emerald-500/40 gap-4">
-             <div className="flex flex-col gap-1">
-                <span>vm: {vmProgramId}</span>
-                <span>script: {scriptAccount || "MISSING NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT"}</span>
-             </div>
-             <div className="flex flex-col gap-1 text-right">
-                <span>accounts: {accounts ? JSON.stringify(accounts) : "unset"}</span>
-                 <span>
-                  txs:{" "}
-                  {sigs.length ? (
-                    sigs.map((sig, idx) => (
-                      <span key={sig}>
-                        {explorerPrefix ? (
-                          <a href={`${explorerPrefix}${sig}${explorerSuffix}`} target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline">
-                            {shortSig(sig)}
-                          </a>
-                        ) : (
-                          shortSig(sig)
-                        )}
-                        {idx < sigs.length - 1 ? " | " : ""}
-                      </span>
-                    ))
-                  ) : (
-                    "none"
-                  )}
-                </span>
-             </div>
+          <div className="flex flex-col gap-1">
+            <span>vm: {vmProgramId}</span>
+            <span>script: {scriptAccount || "MISSING NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT"}</span>
+            <span>round_status: {outcomeLabel(state.outcome)}</span>
+          </div>
+          <div className="flex flex-col gap-1 text-right">
+            <span>accounts: {accounts ? JSON.stringify(accounts) : "unset"}</span>
+            <span>
+              txs:{" "}
+              {sigs.length ? (
+                sigs.map((sig, idx) => (
+                  <span key={sig}>
+                    {explorerPrefix ? (
+                      <a href={`${explorerPrefix}${sig}${explorerSuffix}`} target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline">
+                        {shortSig(sig)}
+                      </a>
+                    ) : (
+                      shortSig(sig)
+                    )}
+                    {idx < sigs.length - 1 ? " | " : ""}
+                  </span>
+                ))
+              ) : (
+                "none"
+              )}
+            </span>
+          </div>
         </div>
-        
       </main>
     </div>
   );

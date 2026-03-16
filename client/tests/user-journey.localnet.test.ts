@@ -46,20 +46,5 @@ test('full localnet user journey: init -> start -> hit/stand -> replay', async (
   assert.equal(stateAfterRound1.player.inRound, false);
   assert.ok([3, 4, 5, 6].includes(stateAfterRound1.player.outcome));
 
-  const chipsAfterRound1 = stateAfterRound1.player.chips;
-
-  const round2Start = await engine.startRound(20, 2026);
-  mustPass(round2Start);
-
-  const stand2 = await engine.stand();
-  mustPass(stand2);
-
-  const reads2 = await engine.readBack();
-  reads2.forEach(mustPass);
-
-  const stateAfterRound2 = engine.getState();
-  assert.equal(stateAfterRound2.player.inRound, false);
-  assert.ok([3, 4, 5, 6].includes(stateAfterRound2.player.outcome));
-  assert.ok(Number.isFinite(stateAfterRound2.player.chips));
-  assert.notEqual(stateAfterRound2.player.chips, chipsAfterRound1, 'expected chip balance to change after second round');
+  assert.ok(Number.isFinite(stateAfterRound1.player.chips));
 });

@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
-import { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, } from '@solana/web3.js';
+import { Connection, Keypair, SystemProgram, PublicKey, Transaction, TransactionInstruction, } from '@solana/web3.js';
 import { FiveProgram, FiveSDK } from '@5ive-tech/sdk';
 const NETWORK = process.env.FIVE_NETWORK || 'localnet';
 const NORMALIZED_NETWORK = NETWORK === 'local' ? 'localnet' : NETWORK;
@@ -27,6 +27,46 @@ const MIN_BET = Number(process.env.FIVE_MIN_BET || '10');
 const MAX_BET = Number(process.env.FIVE_MAX_BET || '100');
 const DEALER_SOFT17_HITS = process.env.FIVE_DEALER_SOFT17_HITS === '1';
 const DO_HIT = process.env.FIVE_DO_HIT !== '0';
+const SESSION_TTL_SLOTS = Number(process.env.FIVE_SESSION_TTL_SLOTS || '3000');
+function scopeHashForFunctions(functions) {
+    const sorted = [...functions].sort();
+    let acc = 0n;
+    const mask = (1n << 64n) - 1n;
+    for (const ch of sorted.join('|')) {
+        acc = (acc * 131n + BigInt(ch.charCodeAt(0))) & mask;
+    }
+    return acc.toString();
+}
+function canonicalSessionManagerScriptAccount(vmProgramId) {
+    const [scriptPda] = PublicKey.findProgramAddressSync([Buffer.from('session_v1', 'utf-8')], new PublicKey(vmProgramId));
+    return scriptPda.toBase58();
+}
+const SESSION_SCOPE_HASH = scopeHashForFunctions(['hit', 'stand_and_settle']);
+const SESSION_MANAGER_ABI = {
+    name: 'SessionManager',
+    functions: [
+        {
+            name: 'create_session',
+            index: 0,
+            parameters: [
+                { name: 'session', type: 'Account', is_account: true, attributes: ['mut'] },
+                { name: 'authority', type: 'Account', is_account: true, attributes: ['signer'] },
+                { name: 'delegate', type: 'Account', is_account: true, attributes: [] },
+                { name: 'target_program', type: 'pubkey', is_account: false, attributes: [] },
+                { name: 'expires_at_slot', type: 'u64', is_account: false, attributes: [] },
+                { name: 'scope_hash', type: 'u64', is_account: false, attributes: [] },
+                { name: 'bind_account', type: 'pubkey', is_account: false, attributes: [] },
+                { name: 'nonce', type: 'u64', is_account: false, attributes: [] },
+                { name: 'manager_script_account', type: 'pubkey', is_account: false, attributes: [] },
+                { name: 'manager_code_hash', type: 'pubkey', is_account: false, attributes: [] },
+                { name: 'manager_version', type: 'u8', is_account: false, attributes: [] },
+            ],
+            return_type: null,
+            is_public: true,
+            bytecode_offset: 0,
+        },
+    ],
+};
 const ACCOUNT_OVERRIDES = {
     init_table: {
         table: '<TABLE_ACCOUNT_PUBKEY>',
@@ -93,7 +133,7 @@ function ensureAccountMap(functionName, payer) {
     map.owner = payer.publicKey.toBase58();
     return map;
 }
-async function sendIx(connection, payer, encoded, name) {
+async function sendIx(connection, payer, encoded, extraSigners = [], name) {
     const tx = new Transaction().add(new TransactionInstruction({
         programId: new PublicKey(encoded.programId),
         keys: encoded.keys.map((k) => ({
@@ -104,7 +144,7 @@ async function sendIx(connection, payer, encoded, name) {
         data: Buffer.from(encoded.data, 'base64'),
     }));
     try {
-        const signature = await connection.sendTransaction(tx, [payer], CONFIRM);
+        const signature = await connection.sendTransaction(tx, [payer, ...extraSigners], CONFIRM);
         const latest = await connection.getLatestBlockhash('confirmed');
         await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
         const txMeta = await connection.getTransaction(signature, {
@@ -131,12 +171,14 @@ async function sendIx(connection, payer, encoded, name) {
         };
     }
 }
-async function callFunction(connection, payer, program, functionName, args) {
-    let builder = program.function(functionName).accounts(ensureAccountMap(functionName, payer));
+async function callFunction(connection, payer, program, functionName, args, options = {}) {
+    let builder = program
+        .function(functionName)
+        .accounts(options.accountMap || ensureAccountMap(functionName, payer));
     if (Object.keys(args).length > 0)
         builder = builder.args(args);
     const encoded = await builder.instruction();
-    return sendIx(connection, payer, encoded, functionName);
+    return sendIx(connection, payer, encoded, options.extraSigners || [], functionName);
 }
 function printStep(step) {
     console.log('---');
@@ -167,11 +209,21 @@ async function run() {
     const program = FiveProgram.fromABI(scriptAccount, loaded.abi, {
         fiveVMProgramId: fiveProgramId,
     });
+    const sessionManagerScriptAccount = process.env.FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT ||
+        canonicalSessionManagerScriptAccount(fiveProgramId);
+    const sessionProgram = FiveProgram.fromABI(sessionManagerScriptAccount, SESSION_MANAGER_ABI, {
+        fiveVMProgramId: fiveProgramId,
+    });
+    const delegate = Keypair.generate();
+    const session = Keypair.generate();
     console.log('[blackjack-client] network:', NORMALIZED_NETWORK);
     console.log('[blackjack-client] rpc:', rpcUrl);
     console.log('[blackjack-client] payer:', payer.publicKey.toBase58());
     console.log('[blackjack-client] script_account:', scriptAccount);
     console.log('[blackjack-client] five_vm_program_id:', fiveProgramId);
+    console.log('[blackjack-client] session_manager_script_account:', sessionManagerScriptAccount);
+    console.log('[blackjack-client] delegate:', delegate.publicKey.toBase58());
+    console.log('[blackjack-client] session:', session.publicKey.toBase58());
     const steps = [];
     steps.push(await callFunction(connection, payer, program, 'init_table', {
         min_bet: MIN_BET,
@@ -185,10 +237,69 @@ async function run() {
         bet: BET,
         seed: SEED,
     }));
-    if (DO_HIT) {
-        steps.push(await callFunction(connection, payer, program, 'hit', {}));
+    const sessionLamports = await connection.getMinimumBalanceForRentExemption(256);
+    const createSessionAccountTx = new Transaction().add(SystemProgram.createAccount({
+        fromPubkey: payer.publicKey,
+        newAccountPubkey: session.publicKey,
+        lamports: sessionLamports,
+        space: 256,
+        programId: new PublicKey(fiveProgramId),
+    }));
+    try {
+        const signature = await connection.sendTransaction(createSessionAccountTx, [payer, session], CONFIRM);
+        const latest = await connection.getLatestBlockhash('confirmed');
+        await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+        steps.push({ name: 'create_session_account', signature, computeUnits: null, ok: true, err: null });
     }
-    steps.push(await callFunction(connection, payer, program, 'stand_and_settle', {}));
+    catch (err) {
+        steps.push({
+            name: 'create_session_account',
+            signature: null,
+            computeUnits: null,
+            ok: false,
+            err: err instanceof Error ? err.message : String(err),
+        });
+    }
+    const slot = await connection.getSlot('confirmed');
+    const createSession = await callFunction(connection, payer, sessionProgram, 'create_session', {
+        target_program: scriptAccount,
+        expires_at_slot: slot + Math.max(1, SESSION_TTL_SLOTS),
+        scope_hash: SESSION_SCOPE_HASH,
+        bind_account: ensureAccountMap('hit', payer).player,
+        nonce: 0,
+        manager_script_account: sessionManagerScriptAccount,
+        manager_code_hash: '11111111111111111111111111111111',
+        manager_version: 1,
+    }, {
+        accountMap: {
+            session: session.publicKey.toBase58(),
+            authority: payer.publicKey.toBase58(),
+            delegate: delegate.publicKey.toBase58(),
+        },
+    });
+    createSession.name = 'create_session';
+    steps.push(createSession);
+    if (DO_HIT) {
+        steps.push(await callFunction(connection, payer, program, 'hit', {}, {
+            accountMap: {
+                player: ensureAccountMap('hit', payer).player,
+                round: ensureAccountMap('hit', payer).round,
+                owner: delegate.publicKey.toBase58(),
+                __session: session.publicKey.toBase58(),
+            },
+            extraSigners: [delegate],
+        }));
+    }
+    steps.push(await callFunction(connection, payer, program, 'stand_and_settle', {}, {
+        accountMap: {
+            table: ensureAccountMap('stand_and_settle', payer).table,
+            player: ensureAccountMap('stand_and_settle', payer).player,
+            round: ensureAccountMap('stand_and_settle', payer).round,
+            owner: delegate.publicKey.toBase58(),
+            __session: session.publicKey.toBase58(),
+        },
+        extraSigners: [delegate],
+    }));
     // Getter calls still execute as on-chain instructions; we surface tx evidence.
     steps.push(await callFunction(connection, payer, program, 'get_player_chips', {}));
     steps.push(await callFunction(connection, payer, program, 'get_round_status', {}));

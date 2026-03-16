@@ -18,7 +18,6 @@ Prereqs:
 npm run test:onchain:local
 npm run client:run:local
 npm run client:test:journey:localnet
-npm run client:gui:localnet
 ```
 
 ## Devnet On-Chain

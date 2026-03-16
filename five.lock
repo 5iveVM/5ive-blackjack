@@ -3,9 +3,9 @@ version = 1
 [[packages]]
 name = "5ive-blackjack"
 version = "0.0.0"
-address = "5Jg48d1vnZdvmQPryZtvENgK1QtqDQpvEarQ7tnSkq7T"
-bytecode_hash = "efb7a327fa28ba7c835cc463d91fb2a82267545153cc5e85949a21b591854771"
-deployed_at = "2026-03-14T08:24:05.167Z"
+address = "4mCGgEpgpeEhoFsCz2DKY1ovsHtjHzf24sgy7tNtcdzW"
+bytecode_hash = "c49c2e4e4dba8db2eb4f342521c6120792c74ed19750801714492efc1fd43e4c"
+deployed_at = "2026-03-15T22:14:05.617Z"
 
   [packages.exports]
   methods = [

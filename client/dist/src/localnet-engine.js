@@ -1,6 +1,7 @@
 import { readFile, readdir } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
+import { spawnSync } from 'child_process';
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, } from '@solana/web3.js';
 import { FiveProgram, FiveSDK } from '@5ive-tech/sdk';
 const ROUND_IDLE = 0;
@@ -10,11 +11,50 @@ const ROUND_DEALER_BUST = 3;
 const ROUND_PLAYER_WIN = 4;
 const ROUND_DEALER_WIN = 5;
 const ROUND_PUSH = 6;
+const SESSION_ACCOUNT_SPACE = 256;
+function scopeHashForFunctions(functions) {
+    const sorted = [...functions].sort();
+    let acc = 0n;
+    const mask = (1n << 64n) - 1n;
+    for (const ch of sorted.join('|')) {
+        acc = (acc * 131n + BigInt(ch.charCodeAt(0))) & mask;
+    }
+    return acc.toString();
+}
+function canonicalSessionManagerScriptAccount(vmProgramId) {
+    const [scriptPda] = PublicKey.findProgramAddressSync([Buffer.from('session_v1', 'utf-8')], new PublicKey(vmProgramId));
+    return scriptPda.toBase58();
+}
+const SESSION_SCOPE_HASH = scopeHashForFunctions(['hit', 'stand_and_settle']);
 const CONFIRM = {
     commitment: 'confirmed',
     preflightCommitment: 'confirmed',
     skipPreflight: false,
 };
+async function loadSessionManagerArtifact(projectRoot) {
+    const templateProject = join(projectRoot, '..', 'five-templates', 'session-manager');
+    const templateArtifact = join(templateProject, 'build', 'five-session-manager-template.five');
+    const build = spawnSync('node', [join(projectRoot, '..', 'five-cli', 'dist', 'index.js'), 'build', '--project', templateProject], { encoding: 'utf8' });
+    if (build.status !== 0) {
+        throw new Error(`session manager template build failed: ${build.stderr || build.stdout || 'unknown error'}`);
+    }
+    const artifactText = await readFile(templateArtifact, 'utf8');
+    return FiveSDK.loadFiveFile(artifactText);
+}
+async function ensureSessionManagerDeployment(connection, payer, vmProgramId, sessionManagerScriptAccount, projectRoot) {
+    const existing = await connection.getAccountInfo(new PublicKey(sessionManagerScriptAccount), 'confirmed');
+    if (existing)
+        return;
+    const loaded = await loadSessionManagerArtifact(projectRoot);
+    const bytecode = loaded.bytecode;
+    const result = await FiveSDK.deployToSolana(bytecode, connection, payer, {
+        fiveVMProgramId: vmProgramId,
+        service: 'session_v1',
+    });
+    if (!result.success) {
+        throw new Error(`session manager deploy failed: ${result.error || 'unknown error'}`);
+    }
+}
 function parseConsumedUnits(logs) {
     if (!logs)
         return null;
@@ -180,7 +220,11 @@ export class LocalnetBlackjackEngine {
     tableAccount;
     playerAccount;
     roundAccount;
+    delegate;
+    sessionAccount;
+    sessionManagerScriptAccount;
     setupSteps;
+    useDelegatedSession;
     state;
     constructor(args) {
         this.projectRoot = args.projectRoot;
@@ -192,7 +236,11 @@ export class LocalnetBlackjackEngine {
         this.tableAccount = args.tableAccount;
         this.playerAccount = args.playerAccount;
         this.roundAccount = args.roundAccount;
+        this.delegate = args.delegate;
+        this.sessionAccount = args.sessionAccount;
+        this.sessionManagerScriptAccount = args.sessionManagerScriptAccount;
         this.setupSteps = args.setupSteps;
+        this.useDelegatedSession = process.env.FIVE_USE_SESSION !== '0';
         this.state = {
             table: { minBet: 0, maxBet: 0, dealerSoft17Hits: false, roundNonce: 0 },
             player: {
@@ -202,6 +250,7 @@ export class LocalnetBlackjackEngine {
                 dealerTotal: 0,
                 roundStatus: ROUND_IDLE,
                 outcome: ROUND_IDLE,
+                sessionNonce: 0,
                 inRound: false,
             },
             round: {
@@ -218,6 +267,13 @@ export class LocalnetBlackjackEngine {
                 player: [],
                 dealer: [],
                 dealerReveal: false,
+            },
+            session: {
+                active: false,
+                scopeHash: SESSION_SCOPE_HASH,
+                managerScriptAccount: args.sessionManagerScriptAccount,
+                sessionAccount: args.sessionAccount.publicKey.toBase58(),
+                delegate: args.delegate.publicKey.toBase58(),
             },
         };
     }
@@ -247,10 +303,16 @@ export class LocalnetBlackjackEngine {
         const tableAccount = Keypair.generate();
         const playerAccount = Keypair.generate();
         const roundAccount = Keypair.generate();
+        const delegate = Keypair.generate();
+        const sessionAccount = Keypair.generate();
+        const sessionManagerScriptAccount = process.env.FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT ||
+            canonicalSessionManagerScriptAccount(fiveVmProgramId);
+        await ensureSessionManagerDeployment(connection, payer, fiveVmProgramId, sessionManagerScriptAccount, projectRoot);
         const setupSteps = [];
         setupSteps.push(await createOwnedAccount(connection, payer, tableAccount, ownerProgram, 256));
         setupSteps.push(await createOwnedAccount(connection, payer, playerAccount, ownerProgram, 256));
         setupSteps.push(await createOwnedAccount(connection, payer, roundAccount, ownerProgram, 256));
+        setupSteps.push(await createOwnedAccount(connection, payer, sessionAccount, ownerProgram, SESSION_ACCOUNT_SPACE));
         const failed = setupSteps.find((s) => !s.ok);
         if (failed) {
             throw new Error(`failed setup account creation: ${failed.name}: ${failed.err || 'unknown error'}`);
@@ -265,6 +327,9 @@ export class LocalnetBlackjackEngine {
             tableAccount,
             playerAccount,
             roundAccount,
+            delegate,
+            sessionAccount,
+            sessionManagerScriptAccount,
             setupSteps,
         });
     }
@@ -279,6 +344,10 @@ export class LocalnetBlackjackEngine {
             table: this.tableAccount.publicKey.toBase58(),
             player: this.playerAccount.publicKey.toBase58(),
             round: this.roundAccount.publicKey.toBase58(),
+            delegate: this.delegate.publicKey.toBase58(),
+            session: this.sessionAccount.publicKey.toBase58(),
+            __session: this.sessionAccount.publicKey.toBase58(),
+            sessionManagerScriptAccount: this.sessionManagerScriptAccount,
         };
     }
     accountsFor(functionName) {
@@ -288,6 +357,9 @@ export class LocalnetBlackjackEngine {
             table: this.tableAccount.publicKey.toBase58(),
             player: this.playerAccount.publicKey.toBase58(),
             round: this.roundAccount.publicKey.toBase58(),
+            delegate: this.delegate.publicKey.toBase58(),
+            session: this.sessionAccount.publicKey.toBase58(),
+            __session: this.sessionAccount.publicKey.toBase58(),
         };
         if (functionName === 'init_table')
             return { table: base.table, authority: base.authority };
@@ -296,10 +368,26 @@ export class LocalnetBlackjackEngine {
         if (functionName === 'start_round') {
             return { table: base.table, player: base.player, round: base.round, owner: base.owner };
         }
-        if (functionName === 'hit')
-            return { player: base.player, round: base.round, owner: base.owner };
+        if (functionName === 'hit') {
+            const ownerForHit = this.useDelegatedSession ? base.delegate : base.owner;
+            const sessionForHit = this.useDelegatedSession ? base.__session : base.owner;
+            return {
+                player: base.player,
+                round: base.round,
+                owner: ownerForHit,
+                __session: sessionForHit,
+            };
+        }
         if (functionName === 'stand_and_settle') {
-            return { table: base.table, player: base.player, round: base.round, owner: base.owner };
+            const ownerForStand = this.useDelegatedSession ? base.delegate : base.owner;
+            const sessionForStand = this.useDelegatedSession ? base.__session : base.owner;
+            return {
+                table: base.table,
+                player: base.player,
+                round: base.round,
+                owner: ownerForStand,
+                __session: sessionForStand,
+            };
         }
         if (functionName === 'get_player_chips')
             return { player: base.player };
@@ -319,13 +407,63 @@ export class LocalnetBlackjackEngine {
         }
         return builder;
     }
-    async call(functionName, args = {}) {
-        const builder = this.builderFor(functionName, args);
+    async ensureSession() {
+        if (this.state.session.active)
+            return null;
+        const slot = await this.connection.getSlot('confirmed');
+        const ttlSlots = Number(process.env.FIVE_SESSION_TTL_SLOTS || '3000');
+        const expiresAtSlot = slot + Math.max(1, ttlSlots);
+        const nonce = this.state.player.sessionNonce;
+        const sessionManager = await loadSessionManagerArtifact(this.projectRoot);
+        const managerProgram = FiveProgram.fromABI(this.sessionManagerScriptAccount, sessionManager.abi, {
+            fiveVMProgramId: this.fiveVmProgramId,
+        });
+        const builder = managerProgram
+            .function('create_session')
+            .payer(this.payer.publicKey.toBase58())
+            .accounts({
+            session: this.sessionAccount.publicKey.toBase58(),
+            authority: this.payer.publicKey.toBase58(),
+            delegate: this.delegate.publicKey.toBase58(),
+        })
+            .args({
+            target_program: this.scriptAccount,
+            expires_at_slot: expiresAtSlot,
+            scope_hash: SESSION_SCOPE_HASH,
+            bind_account: this.playerAccount.publicKey.toBase58(),
+            nonce,
+        });
         const ix = await builder.instruction();
-        return sendIx(this.connection, this.payer, ix, [], functionName);
+        const step = await sendIx(this.connection, this.payer, ix, [], 'create_session');
+        if (step.ok) {
+            this.state.session.active = true;
+        }
+        return step;
+    }
+    async resolveSessionArgs() {
+        return {};
+    }
+    async call(functionName, args = {}) {
+        const sessionized = this.useDelegatedSession && (functionName === 'hit' || functionName === 'stand_and_settle');
+        let combinedArgs = { ...args };
+        if (sessionized) {
+            const sessionStep = await this.ensureSession();
+            if (sessionStep && !sessionStep.ok)
+                return sessionStep;
+            combinedArgs = { ...combinedArgs, ...(await this.resolveSessionArgs()) };
+        }
+        const builder = this.builderFor(functionName, combinedArgs);
+        const ix = await builder.instruction();
+        const extraSigners = sessionized ? [this.delegate] : [];
+        return sendIx(this.connection, this.payer, ix, extraSigners, functionName);
     }
     async buildUnsignedTx(functionName, _role, args, walletPubkey) {
-        const builder = this.builderFor(functionName, args, walletPubkey);
+        const sessionized = this.useDelegatedSession && (functionName === 'hit' || functionName === 'stand_and_settle');
+        let combinedArgs = { ...args };
+        if (sessionized) {
+            combinedArgs = { ...combinedArgs, ...(await this.resolveSessionArgs()) };
+        }
+        const builder = this.builderFor(functionName, combinedArgs, walletPubkey);
         const ix = await builder.instruction();
         const tx = new Transaction().add(new TransactionInstruction({
             programId: new PublicKey(ix.programId),
@@ -337,7 +475,11 @@ export class LocalnetBlackjackEngine {
             data: Buffer.from(ix.data, 'base64'),
         }));
         tx.feePayer = new PublicKey(walletPubkey);
-        tx.recentBlockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+        const latest = await this.connection.getLatestBlockhash('confirmed');
+        tx.recentBlockhash = latest.blockhash;
+        if (sessionized) {
+            tx.partialSign(this.delegate);
+        }
         return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
     }
     applyInitLocal(setup) {
@@ -351,6 +493,7 @@ export class LocalnetBlackjackEngine {
         this.state.player.dealerTotal = 0;
         this.state.player.roundStatus = ROUND_IDLE;
         this.state.player.outcome = ROUND_IDLE;
+        this.state.player.sessionNonce = 0;
         this.state.player.inRound = false;
         this.state.round.deckSeed = 0;
         this.state.round.ownerMarker = 0;
@@ -363,6 +506,7 @@ export class LocalnetBlackjackEngine {
         this.state.hands.player = [];
         this.state.hands.dealer = [];
         this.state.hands.dealerReveal = false;
+        this.state.session.active = false;
     }
     applyStartRoundLocal(bet, seed) {
         this.state.table.roundNonce += 1;
@@ -422,6 +566,7 @@ export class LocalnetBlackjackEngine {
             this.state.player.inRound = false;
             this.state.hands.dealerReveal = true;
         }
+        this.state.player.sessionNonce += 1;
     }
     applyStandLocal() {
         this.state.round.playerStand = true;
@@ -463,6 +608,7 @@ export class LocalnetBlackjackEngine {
         }
         this.state.player.inRound = false;
         this.state.player.activeBet = 0;
+        this.state.player.sessionNonce += 1;
         this.state.hands.dealerReveal = true;
     }
     async applyLocalAction(action, payload) {
