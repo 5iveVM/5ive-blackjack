@@ -1,7 +1,7 @@
 {
   "network": "mainnet",
   "rpcUrl": "https://api.mainnet-beta.solana.com",
-  "fiveProgramId": "5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst",
+  "fiveProgramId": "5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd",
   "vmStatePda": "<SET_AFTER_VM_INIT>",
   "blackjackScriptAccount": "<SET_AFTER_BLACKJACK_DEPLOY>",
   "updatedAt": "2026-03-11T00:00:00Z"

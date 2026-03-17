@@ -18,7 +18,7 @@ import { FiveProgram, FiveSDK } from "@5ive-tech/sdk";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..", "..", "..");
 const rpcUrl = process.env.FIVE_RPC_URL || "http://127.0.0.1:8899";
-const vmProgramId = process.env.FIVE_VM_PROGRAM_ID || "2DXiYbzfSMwkDSxc9aWEaW7XgJjkNzGdADfRN4FbxMNN";
+const vmProgramId = process.env.FIVE_VM_PROGRAM_ID || "5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd";
 const scriptAccount = process.env.FIVE_SCRIPT_ACCOUNT || "";
 const keypairPath = process.env.SOLANA_KEYPAIR_PATH || join(process.env.HOME || "", ".config/solana/id.json");
 
