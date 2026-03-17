@@ -84,9 +84,9 @@ function canonicalSessionManagerScriptAccount(vmProgramId: string): string {
 const SESSION_SCOPE_HASH = scopeHashForFunctions(["hit", "stand_and_settle"]);
 
 const DEFAULT_VM_PROGRAM_ID =
-  process.env.NEXT_PUBLIC_FIVE_VM_PROGRAM_ID || "2DXiYbzfSMwkDSxc9aWEaW7XgJjkNzGdADfRN4FbxMNN";
+  process.env.NEXT_PUBLIC_FIVE_VM_PROGRAM_ID || "5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst";
 const DEFAULT_SCRIPT_ACCOUNT = process.env.NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT || "";
-const DEFAULT_RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || "";
+const DEFAULT_RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || "https://api.devnet.solana.com";
 
 const SESSION_MANAGER_ABI = {
   name: "SessionManager",

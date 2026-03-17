@@ -1,12 +1,12 @@
 {
-  "artifact_path": "/Users/amberjackson/Documents/Development/five-org/five-mono/5ive-blackjack/build/5ive-blackjack.five",
+  "artifact_path": "/Users/ivmidable/Development/five-mono/5ive-blackjack/build/5ive-blackjack.five",
   "compiler_version": "unknown",
   "source_files": [
-    "/Users/amberjackson/Documents/Development/five-org/five-mono/5ive-blackjack/src/main.v"
+    "/Users/ivmidable/Development/five-mono/5ive-blackjack/src/main.v"
   ],
   "target": "vm",
-  "timestamp": "2026-03-16T22:02:54.930Z",
-  "hash": "fbe7110fbd67e718244a455cb47c59b7bd4ed8fc4aef3a401089f526496647e1",
+  "timestamp": "2026-03-16T23:05:56.510Z",
+  "hash": "86924fc96accb18154b2d91f5bb54f28cada6b5c5f1e293c569ffb7709d0332c",
   "format": "five",
   "entry_point": "src/main.v",
   "source_dir": "src"

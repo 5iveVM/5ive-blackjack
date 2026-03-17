@@ -1,5 +1,4 @@
 import type { NextConfig } from "next";
-import path from "path";
 
 const nextConfig: NextConfig = {
   transpilePackages: ["@5ive-tech/sdk", "five-vm-wasm"],
@@ -22,12 +21,6 @@ const nextConfig: NextConfig = {
       ...config.experiments,
       asyncWebAssembly: true,
       layers: true,
-    };
-
-    config.resolve.alias = {
-      ...(config.resolve.alias || {}),
-      "five-vm-wasm": path.resolve(process.cwd(), "../five-wasm/pkg-bundler/five_vm_wasm.js"),
-      "five-wasm": path.resolve(process.cwd(), "../five-wasm/pkg-bundler/five_vm_wasm.js"),
     };
 
     // Suppress specific warnings from the SDK's node.js imports
