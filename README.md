@@ -1,99 +1,110 @@
 # 5ive Blackjack
 
-Single-player blackjack on 5IVE VM using mock-chip wagers (MVP).
+Teaching-friendly blackjack example built on 5IVE VM.
 
-## Scope (v1)
+This repo shows how to:
+- write a stateful 5IVE contract (`src/main.v`)
+- deploy to Solana via 5IVE VM
+- interact from both a script client and a Next.js UI
+- use delegated sessions for gameplay actions
 
-- Single player vs house
-- Single hand only
-- Hit / stand only
-- Dealer draws to 17 (configurable soft-17 hit)
-- Mock chips only (no SOL/SPL token custody)
+## What This Project Implements
+- Single player vs house blackjack
+- One hand at a time
+- Actions: `hit`, `stand_and_settle`
+- Configurable table limits and dealer soft-17 behavior
+- Mock chips only (no token custody in this version)
 
-## Contract Accounts
+## Contract Model
+Accounts:
+- `BlackjackTable`: table config + round nonce
+- `PlayerState`: bankroll, hand state, session nonce
+- `RoundState`: deterministic draw state
 
-- `BlackjackTable`: table config and betting limits
-- `PlayerState`: player chips, active bet, totals, status/outcome, delegated session nonce
-- `RoundState`: deterministic deck seed, cursor, draw metadata
+Public functions:
+- `init_table`
+- `init_player`
+- `start_round`
+- `hit`
+- `stand_and_settle`
+- `get_player_chips`
+- `get_round_status`
+- `get_last_outcome`
 
-## Public Functions
-
-- `init_table(table, authority, min_bet, max_bet, dealer_soft17_hits)`
-- `init_player(player, owner, initial_chips)`
-- `start_round(table, player, round, owner, bet, seed)`
-- `hit(player, round, owner)`
-- `stand_and_settle(table, player, round, owner)`
-- `get_player_chips(player)`
-- `get_round_status(player)`
-- `get_last_outcome(player)`
-
-## Build and Test
+## Quick Start
+From this folder (`5ive-blackjack/`):
 
 ```bash
 npm run build
 npm test
 ```
 
-## On-Chain Paths
+Run web app:
 
 ```bash
-# Local validator
+npm run web:install
+cp web/.env.example web/.env.local
+npm run web:dev
+```
+
+Open `http://localhost:3000`.
+
+## Network Flows
+Local validator:
+
+```bash
 npm run test:onchain:local
 npm run client:run:local
-npm run client:test:journey:localnet
-npm run client:journey:localnet
+```
 
-# Devnet
+Devnet:
+
+```bash
+npm run deploy:devnet
 npm run test:onchain:devnet
 npm run client:run:devnet
+```
 
-# Mainnet preflight only
+Mainnet preflight (no live txs):
+
+```bash
 npm run test:onchain:mainnet:preflight
+```
 
-# Live mainnet transactions (explicit opt-in)
+Live mainnet path (explicit opt-in):
+
+```bash
 ALLOW_MAINNET_TESTS=1 npm run test:onchain:mainnet
 ```
 
-## Client Configuration
+## Web Configuration
+The web app reads:
+- `NEXT_PUBLIC_RPC_URL`
+- `NEXT_PUBLIC_FIVE_VM_PROGRAM_ID`
+- `NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT`
 
-Set real account addresses in `client/main.ts`:
+Optional:
+- `NEXT_PUBLIC_SESSION_MANAGER_SCRIPT_ACCOUNT`
+- `NEXT_PUBLIC_SESSION_TTL_SLOTS`
+- fixed game accounts (`NEXT_PUBLIC_BJ_TABLE_ACCOUNT`, `NEXT_PUBLIC_BJ_PLAYER_ACCOUNT`, `NEXT_PUBLIC_BJ_ROUND_ACCOUNT`)
 
-- `ACCOUNT_OVERRIDES.init_table.table`
-- `ACCOUNT_OVERRIDES.init_player.player`
-- `ACCOUNT_OVERRIDES.start_round.table|player|round`
-- `ACCOUNT_OVERRIDES.hit.player|round`
-- `ACCOUNT_OVERRIDES.stand_and_settle.table|player|round`
-- getter account mappings (`player`)
+## Repo Structure
+- `src/`: 5IVE contract source
+- `tests/`: contract tests
+- `client/`: scriptable on-chain runner
+- `web/`: Next.js game UI
+- `scripts/`: on-chain and regression helpers
+- `deployment-config.*.json`: per-network deployment config
 
-Set script account via env or deployment config:
+## Cloudflare Pages
+From `web/`:
 
-- `FIVE_SCRIPT_ACCOUNT`, or
-- `deployment-config.<network>.json` -> `blackjackScriptAccount`
+```bash
+npm run build
+npm run deploy:pages
+```
 
-Optional runtime env:
-
-- `FIVE_NETWORK=localnet|devnet|mainnet`
-- `FIVE_BET`, `FIVE_SEED`, `FIVE_INITIAL_CHIPS`
-- `FIVE_MIN_BET`, `FIVE_MAX_BET`
-- `FIVE_DEALER_SOFT17_HITS=1`
-- `FIVE_DO_HIT=0` to skip hit before settle
-- `FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT` optional override (defaults to canonical `session_v1` PDA)
-- `FIVE_SESSION_TTL_SLOTS` session lifetime in slots (default `3000`)
-
-Sessionized gameplay flow:
-1. Create session sidecar account and call `create_session`.
-2. Call delegated `hit` and/or `stand_and_settle`; the delegate key is passed in the `owner` slot and the compiler-injected `__session` account is auto-wired by the client/sdk.
-3. Increment `player.session_nonce` in program logic each delegated action.
-4. Revoke with `revoke_session` when done (web UI includes this control).
-
-## Notes
-
-- Randomness is deterministic and non-cryptographic (MVP only).
-- Payout is even-money (`1x`) for wins.
-- No split, double down, insurance, or surrender in v1.
-
-## Localnet Journey Prereqs
-
-- local validator running at `http://127.0.0.1:8899`
-- Five VM program deployed locally (or set `FIVE_VM_PROGRAM_ID` to the deployed address)
-- payer key available at `~/.config/solana/id.json` (or set `SOLANA_KEYPAIR_PATH`)
+## Notes for Learners
+- Randomness here is deterministic and not cryptographic.
+- This repo prioritizes clarity over full casino-feature completeness.
+- Session mode in the UI demonstrates delegated calls cleanly.

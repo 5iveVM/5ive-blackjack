@@ -29,6 +29,8 @@ type SessionState = {
   managerScriptAccount: string;
 };
 
+type PlayMode = "direct" | "session";
+
 type GameState = {
   chips: number;
   activeBet: number;
@@ -63,7 +65,8 @@ const SESSION_TTL_SLOTS = Number(process.env.NEXT_PUBLIC_SESSION_TTL_SLOTS || "3
 const SESSION_DELEGATE_MIN_FEE_LAMPORTS = 500_000;
 const SESSION_DELEGATE_TOPUP_LAMPORTS = 2_000_000;
 
-const SESSION_SCOPE_HASH = scopeHashForFunctions(["hit", "stand_and_settle"]);
+const DEFAULT_SESSION_SCOPE_HASH = scopeHashForFunctions(["hit", "stand_and_settle"]);
+const SESSION_SCOPE_HASH = process.env.NEXT_PUBLIC_SESSION_SCOPE_HASH || DEFAULT_SESSION_SCOPE_HASH;
 
 const DEFAULT_VM_PROGRAM_ID =
   process.env.NEXT_PUBLIC_FIVE_VM_PROGRAM_ID || "5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd";
@@ -207,6 +210,10 @@ function shortSig(sig: string): string {
   return sig.length > 14 ? `${sig.slice(0, 6)}...${sig.slice(-6)}` : sig;
 }
 
+function shortKey(value: string): string {
+  return value.length > 14 ? `${value.slice(0, 6)}...${value.slice(-6)}` : value;
+}
+
 export default function Home() {
   const { connection } = useConnection();
   const wallet = useWallet();
@@ -225,6 +232,7 @@ export default function Home() {
     expiresAtSlot: null,
     managerScriptAccount: "",
   });
+  const [playMode, setPlayMode] = useState<PlayMode>("direct");
 
   const vmProgramId = useMemo(() => DEFAULT_VM_PROGRAM_ID, []);
   const scriptAccount = useMemo(() => DEFAULT_SCRIPT_ACCOUNT, []);
@@ -458,6 +466,15 @@ export default function Home() {
     let txFeePayer: PublicKey | undefined;
     let requireWalletSignature = true;
     if (sessionized) {
+      if (playMode !== "session") {
+        const ix = await buildInstruction(functionName, mergedArgs, resolved);
+        await sendAndConfirm(new Transaction().add(ix), extraSigners, {
+          feePayer: txFeePayer,
+          requireWalletSignature,
+        });
+        setSession((prev) => ({ ...prev, nonce: prev.nonce + 1 }));
+        return;
+      }
       const delegatedReady =
         session.status === "active" && !!session.delegate && !!session.sessionAccount;
       if (delegatedReady) {
@@ -470,6 +487,8 @@ export default function Home() {
           txFeePayer = session.delegate!.publicKey;
           requireWalletSignature = false;
         }
+      } else {
+        throw new Error("Session mode is enabled, but no active delegated session exists.");
       }
       mergedArgs = { ...mergedArgs };
     }
@@ -587,7 +606,13 @@ export default function Home() {
       payer: wallet.publicKey.toBase58(),
     });
     await sendAndConfirm(new Transaction().add(revokeIx));
-    setSession((prev) => ({ ...prev, status: "revoked" }));
+    setSession((prev) => ({
+      ...prev,
+      status: "revoked",
+      delegate: null,
+      sessionAccount: null,
+      expiresAtSlot: null,
+    }));
   }
 
   async function setupAndDeal(seed: number, wager: number) {
@@ -732,7 +757,12 @@ export default function Home() {
       await fn();
       setStatus(`${name} complete`);
     } catch (err) {
-      setStatus(`${name} failed: ${errText(err)}`);
+      const message = errText(err);
+      if (/access forbidden|\"code\"\s*:\s*403/i.test(message)) {
+        setStatus(`${name} failed: RPC endpoint blocked this request (403). Switch to a permitted endpoint.`);
+      } else {
+        setStatus(`${name} failed: ${message}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -743,139 +773,120 @@ export default function Home() {
   const canStand = walletConnected && !busy && state.inRound;
   const canCreateSession = walletConnected && !busy && !!scriptAccount;
   const canRevokeSession = walletConnected && !busy && session.status === "active" && !!session.sessionAccount;
+  const hasActiveDelegatedSession = isDelegatedSessionActive(session);
+  const sessionModeBlocked = playMode === "session" && !hasActiveDelegatedSession;
   const dealerDisplayTotal = state.dealerReveal ? state.dealerTotal : "?";
   const banner = !state.inRound ? outcomeBanner(state.outcome) : null;
 
   return (
-    <div className="min-h-screen relative overflow-hidden flex flex-col bg-emerald-950">
-      <Navbar />
+    <div className="h-[100dvh] relative overflow-hidden flex flex-col bg-emerald-950">
+      <Navbar status={status} chips={state.chips} activeBet={state.activeBet} walletConnected={walletConnected} />
 
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_rgba(16,185,129,0.15)_0%,_rgba(2,44,34,1)_100%)] pointer-events-none z-0" />
       <div className="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/black-paper.png')] pointer-events-none mix-blend-overlay z-0" />
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-emerald-400/5 rounded-full blur-[100px] pointer-events-none z-0" />
 
-      <main className="flex-1 w-full max-w-7xl mx-auto px-4 md:px-8 pt-24 pb-8 relative z-10 flex flex-col">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-emerald-100/70 border-b border-emerald-500/20 pb-4">
-          <div>
-            <h1 className="text-xl md:text-2xl font-black tracking-widest uppercase text-transparent bg-clip-text bg-gradient-to-r from-emerald-200 to-teal-400 drop-shadow-md">
-              5ive Blackjack
-            </h1>
-            <p className="text-xs font-mono uppercase tracking-wider opacity-60">status: {status}</p>
-          </div>
-          <div className="flex items-center gap-6 text-sm font-mono uppercase tracking-wider">
-            <div className="flex flex-col items-end">
-              <span className="text-emerald-500/50 text-[10px]">Bankroll</span>
-              <span className="text-lg font-bold text-emerald-300">${state.chips}</span>
-            </div>
-            <div className="flex flex-col items-end">
-              <span className="text-emerald-500/50 text-[10px]">Active Bet</span>
-              <span className="text-lg text-emerald-100">${state.activeBet}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex-1 relative flex flex-col justify-between py-8">
-          <div className="flex flex-col items-center">
-            <div className="mb-2 w-full max-w-md flex items-center gap-4">
-              <div className="h-px bg-emerald-500/20 flex-1" />
-              <div className="text-center">
-                <span className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-200/50 block">Dealer</span>
-                <span className="text-lg font-mono text-emerald-100">{dealerDisplayTotal}</span>
+      <main className="flex-1 w-full max-w-7xl mx-auto px-3 md:px-6 pt-20 pb-3 relative z-10 min-h-0 overflow-hidden">
+        <div className="grid h-full min-h-0 gap-3 grid-rows-[minmax(0,1fr)_auto] md:grid-rows-1 md:grid-cols-[minmax(0,1fr)_340px] xl:grid-cols-[minmax(0,1fr)_380px]">
+          <section className="order-1 md:order-1 rounded-3xl border border-emerald-300/15 bg-black/35 backdrop-blur-xl p-2.5 md:p-4 shadow-[0_20px_50px_rgba(0,0,0,0.45)] flex flex-col justify-between min-h-0 overflow-hidden">
+            <div className="flex flex-col items-center">
+              <div className="mb-1 w-full max-w-md flex items-center gap-2">
+                <div className="h-px bg-emerald-500/20 flex-1" />
+                <div className="text-center">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-200/50 block">Dealer</span>
+                  <span className="text-lg font-mono text-emerald-100">{dealerDisplayTotal}</span>
+                </div>
+                <div className="h-px bg-emerald-500/20 flex-1" />
               </div>
-              <div className="h-px bg-emerald-500/20 flex-1" />
+
+              <div className="flex justify-center -space-x-7 sm:-space-x-8 md:-space-x-10 perspective-1000 min-h-20 sm:min-h-24 md:min-h-32 py-1 px-3 sm:px-4 md:px-6">
+                {state.dealerCards.length === 0 && (
+                  <div className="w-14 h-20 sm:w-16 sm:h-24 md:w-20 md:h-28 rounded-xl border border-dashed border-emerald-500/20 flex items-center justify-center opacity-30">
+                    <span className="text-[10px] uppercase font-bold text-emerald-200">Empty</span>
+                  </div>
+                )}
+                {state.dealerCards.map((rank, idx) => {
+                  const hidden = !state.dealerReveal && idx === 1;
+                  const suit = suitFor(idx, state.deckSeed + 29);
+                  return (
+                    <PlayingCard
+                      key={`d-${idx}`}
+                      index={idx}
+                      hidden={hidden}
+                      rankLabel={rankLabel(rank)}
+                      suitLabel={suit}
+                    />
+                  );
+                })}
+              </div>
             </div>
 
-            <div className="flex justify-center -space-x-10 perspective-1000 min-h-36 py-2 px-8">
-              {state.dealerCards.length === 0 && (
-                <div className="w-20 h-28 rounded-xl border border-dashed border-emerald-500/20 flex items-center justify-center opacity-30">
-                  <span className="text-[10px] uppercase font-bold text-emerald-200">Empty</span>
+            <div className="flex flex-col items-center justify-center my-1.5 md:my-2">
+              <div className="text-center opacity-30 pointer-events-none select-none mb-1">
+                <h2 className="text-lg sm:text-xl md:text-3xl font-black uppercase tracking-[0.2em] md:tracking-[0.28em] text-emerald-100">Blackjack</h2>
+                <p className="text-[10px] sm:text-xs md:text-sm font-bold tracking-[0.24em] md:tracking-[0.35em] text-emerald-200">Pays 3 to 2</p>
+                <p className="hidden md:block text-[10px] uppercase tracking-widest text-emerald-300/60 mt-1">Dealer Draws to 16, Stands on 17</p>
+              </div>
+
+              {banner && (
+                <div className={`mt-1 rounded-full border px-3 sm:px-4 md:px-5 py-1 text-[10px] sm:text-xs md:text-sm font-bold tracking-widest uppercase shadow-[0_0_30px_rgba(0,0,0,0.5)] backdrop-blur-md ${banner.cls}`}>
+                  {banner.text}
                 </div>
               )}
-              {state.dealerCards.map((rank, idx) => {
-                const hidden = !state.dealerReveal && idx === 1;
-                const suit = suitFor(idx, state.deckSeed + 29);
-                return (
-                  <PlayingCard
-                    key={`d-${idx}`}
-                    index={idx}
-                    hidden={hidden}
-                    rankLabel={rankLabel(rank)}
-                    suitLabel={suit}
-                  />
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="flex flex-col items-center justify-center my-8">
-            <div className="text-center opacity-30 pointer-events-none select-none mb-6">
-              <h2 className="text-3xl font-black uppercase tracking-[0.3em] text-emerald-100">Blackjack</h2>
-              <p className="text-sm font-bold tracking-[0.4em] text-emerald-200">Pays 3 to 2</p>
-              <p className="text-[10px] uppercase tracking-widest text-emerald-300/60 mt-2">Dealer Must Draw to 16 and Stand on All 17s</p>
             </div>
 
-            {banner && (
-              <div className={`mt-4 rounded-full border px-6 py-2 text-sm font-bold tracking-widest uppercase shadow-[0_0_30px_rgba(0,0,0,0.5)] backdrop-blur-md ${banner.cls}`}>
-                {banner.text}
+            <div className="flex flex-col items-center">
+              <div className="flex justify-center -space-x-7 sm:-space-x-8 md:-space-x-10 perspective-1000 min-h-20 sm:min-h-24 md:min-h-32 py-1 px-3 sm:px-4 md:px-6 z-10">
+                {state.playerCards.length === 0 && (
+                  <div className="w-14 h-20 sm:w-16 sm:h-24 md:w-20 md:h-28 rounded-xl border border-dashed border-emerald-500/20 flex items-center justify-center opacity-30">
+                    <span className="text-[10px] uppercase font-bold text-emerald-200">Empty</span>
+                  </div>
+                )}
+                {state.playerCards.map((rank, idx) => {
+                  const suit = suitFor(idx, state.deckSeed + 11);
+                  return (
+                    <PlayingCard
+                      key={`p-${idx}`}
+                      index={idx}
+                      hidden={false}
+                      rankLabel={rankLabel(rank)}
+                      suitLabel={suit}
+                    />
+                  );
+                })}
               </div>
-            )}
-          </div>
 
-          <div className="flex flex-col items-center">
-            <div className="flex justify-center -space-x-10 perspective-1000 min-h-36 py-2 px-8 z-10">
-              {state.playerCards.length === 0 && (
-                <div className="w-20 h-28 rounded-xl border border-dashed border-emerald-500/20 flex items-center justify-center opacity-30">
-                  <span className="text-[10px] uppercase font-bold text-emerald-200">Empty</span>
+              <div className="mt-1.5 md:mt-2 w-full max-w-md flex items-center gap-3">
+                <div className="h-px bg-emerald-500/20 flex-1" />
+                <div className="text-center">
+                  <span className="text-base md:text-lg font-mono text-emerald-100">{state.playerTotal}</span>
+                  <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-200/50 block">Player</span>
                 </div>
-              )}
-              {state.playerCards.map((rank, idx) => {
-                const suit = suitFor(idx, state.deckSeed + 11);
-                return (
-                  <PlayingCard
-                    key={`p-${idx}`}
-                    index={idx}
-                    hidden={false}
-                    rankLabel={rankLabel(rank)}
-                    suitLabel={suit}
-                  />
-                );
-              })}
-            </div>
-
-            <div className="mt-4 w-full max-w-md flex items-center gap-4">
-              <div className="h-px bg-emerald-500/20 flex-1" />
-              <div className="text-center">
-                <span className="text-lg font-mono text-emerald-100">{state.playerTotal}</span>
-                <span className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-200/50 block">Player 1</span>
+                <div className="h-px bg-emerald-500/20 flex-1" />
               </div>
-              <div className="h-px bg-emerald-500/20 flex-1" />
             </div>
-          </div>
-        </div>
+          </section>
 
-        <div className="mt-8 mx-auto w-full max-w-5xl rounded-3xl border border-white/5 bg-black/40 backdrop-blur-xl p-4 md:p-6 shadow-[0_20px_50px_rgba(0,0,0,0.5)] flex flex-col gap-4 z-20">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-            <div className="flex items-center gap-3">
-              <div className="flex flex-col">
-                <label className="text-[10px] uppercase font-bold tracking-widest text-slate-400 mb-1">Place Bet</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
-                  <input
-                    type="number"
-                    className="w-32 rounded-xl border border-white/10 bg-white/5 py-2.5 pl-7 pr-3 text-lg font-mono text-white transition-all focus:border-emerald-500/50 focus:bg-white/10 outline-none disabled:opacity-50"
-                    value={bet}
-                    min={state.minBet}
-                    max={state.maxBet}
-                    disabled={busy || state.inRound}
-                    onChange={(e) => setBet(Number(e.target.value || 0))}
-                  />
-                </div>
+          <aside className="order-2 md:order-2 rounded-3xl border border-white/10 bg-black/40 backdrop-blur-xl p-2.5 md:p-4 shadow-[0_20px_50px_rgba(0,0,0,0.5)] flex flex-col gap-2 md:gap-3 min-h-0 max-h-none md:max-h-[calc(100dvh-6.5rem)] overflow-hidden md:overflow-y-auto">
+            <div className="grid grid-cols-[auto_1fr] items-end gap-2">
+              <label className="text-[10px] uppercase font-bold tracking-widest text-slate-400 pb-1">Bet</label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
+                <input
+                  type="number"
+                  className="w-full rounded-xl border border-white/10 bg-white/5 py-2 pl-7 pr-3 text-base font-mono text-white transition-all focus:border-emerald-500/50 focus:bg-white/10 outline-none disabled:opacity-50"
+                  value={bet}
+                  min={state.minBet}
+                  max={state.maxBet}
+                  disabled={busy || state.inRound}
+                  onChange={(e) => setBet(Number(e.target.value || 0))}
+                />
               </div>
             </div>
 
-            <div className="flex items-center gap-3 w-full md:w-auto">
+            <div className="grid grid-cols-3 gap-2">
               <button
-                className="flex-1 md:flex-none rounded-xl bg-gradient-to-t from-emerald-600 to-emerald-400 px-8 py-3 text-sm font-black uppercase tracking-widest text-emerald-950 hover:from-emerald-500 hover:to-emerald-300 disabled:from-slate-800 disabled:to-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-lg active:scale-95"
+                className="rounded-xl bg-gradient-to-t from-emerald-600 to-emerald-400 px-3 py-2 text-xs font-black uppercase tracking-widest text-emerald-950 hover:from-emerald-500 hover:to-emerald-300 disabled:from-slate-800 disabled:to-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-lg active:scale-95"
                 disabled={!canDeal}
                 onClick={() =>
                   runAction("deal", async () => {
@@ -890,81 +901,118 @@ export default function Home() {
               </button>
 
               <button
-                className="flex-1 md:flex-none rounded-xl border border-white/10 bg-white/5 px-6 py-3 text-sm font-bold uppercase tracking-widest text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
-                disabled={!canHit}
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold uppercase tracking-widest text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
+                disabled={!canHit || sessionModeBlocked}
                 onClick={() => runAction("hit", async () => { await callAction("hit", {}); applyHit(); })}
               >
                 Hit
               </button>
 
               <button
-                className="flex-1 md:flex-none rounded-xl border border-rose-500/30 bg-rose-500/10 px-6 py-3 text-sm font-bold uppercase tracking-widest text-rose-300 hover:bg-rose-500/20 hover:border-rose-500/50 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
-                disabled={!canStand}
+                className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-bold uppercase tracking-widest text-rose-300 hover:bg-rose-500/20 hover:border-rose-500/50 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
+                disabled={!canStand || sessionModeBlocked}
                 onClick={() => runAction("stand", async () => { await callAction("stand_and_settle", {}); applyStand(); })}
               >
                 Stand
               </button>
             </div>
-          </div>
 
-          <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3 text-xs font-mono text-emerald-100/80">
-            <div className="mb-2 uppercase tracking-widest text-emerald-300/70">Session Controls (Hit/Stand)</div>
-            <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-center">
-              <div className="space-y-1 break-all">
-                <div>status: {session.status}</div>
-                <div>nonce: {session.nonce}</div>
-                <div>scope_hash: {SESSION_SCOPE_HASH}</div>
-                <div>manager: {session.managerScriptAccount || resolveSessionManagerScriptAccount()}</div>
-                <div>delegate: {session.delegate?.publicKey.toBase58() || "unset"}</div>
-                <div>session: {session.sessionAccount?.publicKey.toBase58() || "unset"}</div>
-                <div>expires_at_slot: {session.expiresAtSlot ?? "unset"}</div>
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-2 text-xs font-mono text-emerald-100/80">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="uppercase tracking-widest text-emerald-300/70">Session</div>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider ${
+                  session.status === "active"
+                    ? "bg-emerald-400/20 text-emerald-200"
+                    : session.status === "revoked"
+                    ? "bg-rose-400/20 text-rose-200"
+                    : "bg-white/10 text-emerald-100/80"
+                }`}>
+                  {session.status}
+                </span>
               </div>
-              <button
-                className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-xs font-bold uppercase tracking-wider text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
-                disabled={!canCreateSession}
-                onClick={() => runAction("create session", createSession)}
-              >
-                Create Session
-              </button>
-              <button
-                className="rounded-xl border border-rose-400/40 bg-rose-500/20 px-4 py-2 text-xs font-bold uppercase tracking-wider text-rose-100 hover:bg-rose-500/30 disabled:opacity-40"
-                disabled={!canRevokeSession}
-                onClick={() => runAction("revoke session", revokeSession)}
-              >
-                Revoke Session
-              </button>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <button
+                  className={`rounded-lg px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+                    playMode === "direct"
+                      ? "border border-sky-300/50 bg-sky-500/25 text-sky-100"
+                      : "border border-white/15 bg-white/5 text-emerald-100 hover:bg-white/10"
+                  }`}
+                  disabled={busy}
+                  onClick={() => setPlayMode("direct")}
+                >
+                  Direct
+                </button>
+                <button
+                  className={`rounded-lg px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+                    playMode === "session"
+                      ? "border border-sky-300/50 bg-sky-500/25 text-sky-100"
+                      : "border border-white/15 bg-white/5 text-emerald-100 hover:bg-white/10"
+                  }`}
+                  disabled={busy}
+                  onClick={() => setPlayMode("session")}
+                >
+                  Session
+                </button>
+                <span className="text-[10px] uppercase tracking-wider text-emerald-200/75">
+                  {playMode === "session" && !hasActiveDelegatedSession ? "session mode needs active session" : `mode: ${playMode}`}
+                </span>
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <button
+                  className="rounded-lg border border-emerald-400/40 bg-emerald-500/20 px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
+                  disabled={!canCreateSession}
+                  onClick={() => runAction("create session", createSession)}
+                >
+                  Create Session
+                </button>
+                <button
+                  className="rounded-lg border border-rose-400/40 bg-rose-500/20 px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-rose-100 hover:bg-rose-500/30 disabled:opacity-40"
+                  disabled={!canRevokeSession}
+                  onClick={() => runAction("revoke session", revokeSession)}
+                >
+                  Revoke Session
+                </button>
+              </div>
+              <div className="mt-2 text-[10px] uppercase tracking-wider text-emerald-200/70">
+                {playMode === "direct"
+                  ? "Direct mode uses your wallet for hit/stand."
+                  : hasActiveDelegatedSession
+                  ? "Session mode ready."
+                  : "Create a session to use session mode."}
+              </div>
             </div>
-          </div>
-        </div>
 
-        <div className="mt-6 flex flex-col md:flex-row justify-between text-[10px] font-mono text-emerald-500/40 gap-4">
-          <div className="flex flex-col gap-1">
-            <span>vm: {vmProgramId}</span>
-            <span>script: {scriptAccount || "MISSING NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT"}</span>
-            <span>round_status: {outcomeLabel(state.outcome)}</span>
-          </div>
-          <div className="flex flex-col gap-1 text-right">
-            <span>accounts: {accounts ? JSON.stringify(accounts) : "unset"}</span>
-            <span>
-              txs:{" "}
-              {sigs.length ? (
-                sigs.map((sig, idx) => (
-                  <span key={sig}>
-                    {explorerPrefix ? (
-                      <a href={`${explorerPrefix}${sig}${explorerSuffix}`} target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline">
-                        {shortSig(sig)}
-                      </a>
-                    ) : (
-                      shortSig(sig)
-                    )}
-                    {idx < sigs.length - 1 ? " | " : ""}
-                  </span>
-                ))
-              ) : (
-                "none"
-              )}
-            </span>
-          </div>
+              <div className="hidden md:block mt-1 rounded-xl border border-white/10 bg-black/25 p-2 text-[10px] font-mono text-emerald-500/70 space-y-1">
+              <div>vm: {vmProgramId}</div>
+              <div>script: {scriptAccount || "MISSING NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT"}</div>
+              <div>round_status: {outcomeLabel(state.outcome)}</div>
+              <div>
+                accounts:{" "}
+                {accounts
+                  ? `t=${shortKey(accounts.table)} p=${shortKey(accounts.player)} r=${shortKey(accounts.round)}`
+                  : "unset"}
+              </div>
+              <div>
+                txs:{" "}
+                {sigs.length ? (
+                  sigs.map((sig, idx) => (
+                    <span key={sig}>
+                      {explorerPrefix ? (
+                        <a href={`${explorerPrefix}${sig}${explorerSuffix}`} target="_blank" rel="noreferrer" className="text-emerald-300 hover:underline">
+                          {shortSig(sig)}
+                        </a>
+                      ) : (
+                        shortSig(sig)
+                      )}
+                      {idx < sigs.length - 1 ? " | " : ""}
+                    </span>
+                  ))
+                ) : (
+                  "none"
+                )}
+              </div>
+            </div>
+          </aside>
         </div>
       </main>
     </div>
