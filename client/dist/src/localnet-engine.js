@@ -370,7 +370,7 @@ export class LocalnetBlackjackEngine {
         }
         if (functionName === 'hit') {
             const ownerForHit = this.useDelegatedSession ? base.delegate : base.owner;
-            const sessionForHit = this.useDelegatedSession ? base.__session : base.owner;
+            const sessionForHit = this.useDelegatedSession ? base.__session : this.fiveVmProgramId;
             return {
                 player: base.player,
                 round: base.round,
@@ -380,7 +380,7 @@ export class LocalnetBlackjackEngine {
         }
         if (functionName === 'stand_and_settle') {
             const ownerForStand = this.useDelegatedSession ? base.delegate : base.owner;
-            const sessionForStand = this.useDelegatedSession ? base.__session : base.owner;
+            const sessionForStand = this.useDelegatedSession ? base.__session : this.fiveVmProgramId;
             return {
                 table: base.table,
                 player: base.player,

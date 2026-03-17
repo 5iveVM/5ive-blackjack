@@ -9,6 +9,8 @@
     "test": "node ../five-cli/dist/index.js test",
     "test:onchain:local": "node scripts/run-onchain.mjs localnet",
     "test:onchain:devnet": "node scripts/run-onchain.mjs devnet",
+    "test:session-smoke:localnet": "FIVE_RPC_URL=http://127.0.0.1:8899 node scripts/session-regression-smoke.mjs --rpc-url http://127.0.0.1:8899 --script-account $FIVE_SCRIPT_ACCOUNT",
+    "test:session-smoke:devnet": "node scripts/session-regression-smoke.mjs --rpc-url https://api.devnet.solana.com --script-account $FIVE_SCRIPT_ACCOUNT",
     "test:onchain:mainnet": "node scripts/run-onchain.mjs mainnet",
     "test:onchain:mainnet:preflight": "node ../five-cli/dist/index.js test --on-chain --target mainnet",
     "deploy:local": "node ../five-cli/dist/index.js deploy build/*.five --project . --target local",

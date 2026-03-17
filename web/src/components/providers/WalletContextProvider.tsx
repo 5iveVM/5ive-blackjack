@@ -10,7 +10,7 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 
 export function WalletContextProvider({ children }: { children: React.ReactNode }) {
   const endpoint = useMemo(
-    () => process.env.NEXT_PUBLIC_RPC_URL || "http://127.0.0.1:8899",
+    () => process.env.NEXT_PUBLIC_RPC_URL || "https://api.devnet.solana.com",
     []
   );
 
