@@ -26,8 +26,10 @@ Thumbs.db
 
 # 5IVE VM
 .five/
+.five/build.json
 *.debug.bin
 
 # Local generated assets
 client/dist/
 *.v.debug
+.reports/
