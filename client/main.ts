@@ -10,7 +10,7 @@ import {
   TransactionInstruction,
   type ConfirmOptions,
 } from '@solana/web3.js';
-import { FiveProgram, FiveSDK } from '@5ive-tech/sdk';
+import { FiveProgram, FiveSDK, SessionClient, scopeHashForFunctions } from '@5ive-tech/sdk';
 
 type StepResult = {
   name: string;
@@ -28,9 +28,9 @@ const RPC_BY_NETWORK: Record<string, string> = {
   mainnet: 'https://api.mainnet-beta.solana.com',
 };
 const PROGRAM_BY_NETWORK: Record<string, string> = {
-  localnet: '5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst',
-  devnet: '5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst',
-  mainnet: '5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst',
+  localnet: '5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd',
+  devnet: '5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd',
+  mainnet: '5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd',
 };
 const CONFIRM: ConfirmOptions = {
   commitment: 'confirmed',
@@ -47,51 +47,7 @@ const DEALER_SOFT17_HITS = process.env.FIVE_DEALER_SOFT17_HITS === '1';
 const DO_HIT = process.env.FIVE_DO_HIT !== '0';
 const SESSION_TTL_SLOTS = Number(process.env.FIVE_SESSION_TTL_SLOTS || '3000');
 
-function scopeHashForFunctions(functions: string[]): string {
-  const sorted = [...functions].sort();
-  let acc = 0n;
-  const mask = (1n << 64n) - 1n;
-  for (const ch of sorted.join('|')) {
-    acc = (acc * 131n + BigInt(ch.charCodeAt(0))) & mask;
-  }
-  return acc.toString();
-}
-
-function canonicalSessionManagerScriptAccount(vmProgramId: string): string {
-  const [scriptPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from('session_v1', 'utf-8')],
-    new PublicKey(vmProgramId)
-  );
-  return scriptPda.toBase58();
-}
-
 const SESSION_SCOPE_HASH = scopeHashForFunctions(['hit', 'stand_and_settle']);
-
-const SESSION_MANAGER_ABI = {
-  name: 'SessionManager',
-  functions: [
-    {
-      name: 'create_session',
-      index: 0,
-      parameters: [
-        { name: 'session', type: 'Account', is_account: true, attributes: ['mut'] },
-        { name: 'authority', type: 'Account', is_account: true, attributes: ['signer'] },
-        { name: 'delegate', type: 'Account', is_account: true, attributes: [] },
-        { name: 'target_program', type: 'pubkey', is_account: false, attributes: [] },
-        { name: 'expires_at_slot', type: 'u64', is_account: false, attributes: [] },
-        { name: 'scope_hash', type: 'u64', is_account: false, attributes: [] },
-        { name: 'bind_account', type: 'pubkey', is_account: false, attributes: [] },
-        { name: 'nonce', type: 'u64', is_account: false, attributes: [] },
-        { name: 'manager_script_account', type: 'pubkey', is_account: false, attributes: [] },
-        { name: 'manager_code_hash', type: 'pubkey', is_account: false, attributes: [] },
-        { name: 'manager_version', type: 'u8', is_account: false, attributes: [] },
-      ],
-      return_type: null,
-      is_public: true,
-      bytecode_offset: 0,
-    },
-  ],
-} as const;
 
 const ACCOUNT_OVERRIDES: Record<string, Record<string, string>> = {
   init_table: {
@@ -218,6 +174,42 @@ async function sendIx(
   }
 }
 
+async function sendRawIx(
+  connection: Connection,
+  payer: Keypair,
+  ix: TransactionInstruction,
+  extraSigners: Keypair[] = [],
+  name: string
+): Promise<StepResult> {
+  const tx = new Transaction().add(ix);
+  try {
+    const signature = await connection.sendTransaction(tx, [payer, ...extraSigners], CONFIRM);
+    const latest = await connection.getLatestBlockhash('confirmed');
+    await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+    const txMeta = await connection.getTransaction(signature, {
+      commitment: 'confirmed',
+      maxSupportedTransactionVersion: 0,
+    });
+    const metaErr = txMeta?.meta?.err ?? null;
+    const cu = txMeta?.meta?.computeUnitsConsumed ?? parseConsumedUnits(txMeta?.meta?.logMessages);
+    return {
+      name,
+      signature,
+      computeUnits: cu,
+      ok: metaErr == null,
+      err: metaErr == null ? null : JSON.stringify(metaErr),
+    };
+  } catch (err) {
+    return {
+      name,
+      signature: null,
+      computeUnits: null,
+      ok: false,
+      err: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 async function callFunction(
   connection: Connection,
   payer: Keypair,
@@ -278,9 +270,10 @@ async function run(): Promise<void> {
   });
   const sessionManagerScriptAccount =
     process.env.FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT ||
-    canonicalSessionManagerScriptAccount(fiveProgramId);
-  const sessionProgram = FiveProgram.fromABI(sessionManagerScriptAccount, SESSION_MANAGER_ABI as any, {
-    fiveVMProgramId: fiveProgramId,
+    SessionClient.canonicalManagerScriptAccount(fiveProgramId);
+  const sessionClient = new SessionClient({
+    vmProgramId: fiveProgramId,
+    managerScriptAccount: sessionManagerScriptAccount,
   });
   const delegate = Keypair.generate();
   const session = Keypair.generate();
@@ -343,30 +336,34 @@ async function run(): Promise<void> {
   }
 
   const slot = await connection.getSlot('confirmed');
-  const createSession = await callFunction(
-    connection,
-    payer,
-    sessionProgram,
-    'create_session',
+  const createSession = await sessionClient.createSessionWithCompat(
     {
-      target_program: scriptAccount,
-      expires_at_slot: slot + Math.max(1, SESSION_TTL_SLOTS),
-      scope_hash: SESSION_SCOPE_HASH,
-      bind_account: ensureAccountMap('hit', payer).player,
+      authority: payer.publicKey.toBase58(),
+      delegate: delegate.publicKey.toBase58(),
+      targetProgram: scriptAccount,
+      expiresAtSlot: slot + Math.max(1, SESSION_TTL_SLOTS),
+      scopeHash: SESSION_SCOPE_HASH,
+      bindAccount: ensureAccountMap('hit', payer).player,
       nonce: 0,
-      manager_script_account: sessionManagerScriptAccount,
-      manager_code_hash: '11111111111111111111111111111111',
-      manager_version: 1,
+      compatMode: 'auto',
     },
-    {
-      accountMap: {
-        session: session.publicKey.toBase58(),
-        authority: payer.publicKey.toBase58(),
-        delegate: delegate.publicKey.toBase58(),
-      },
-    }
-  );
-  createSession.name = 'create_session';
+    async (ix, schema) => sendRawIx(connection, payer, ix, [], `create_session_${schema}`).then((r) => {
+      if (!r.ok) throw new Error(r.err || 'create_session failed');
+      return r.signature || '';
+    })
+  ).then((result) => ({
+    name: `create_session_${result.schema}`,
+    signature: result.signature,
+    computeUnits: null,
+    ok: true,
+    err: null,
+  })).catch((err) => ({
+    name: 'create_session',
+    signature: null,
+    computeUnits: null,
+    ok: false,
+    err: err instanceof Error ? err.message : String(err),
+  }));
   steps.push(createSession);
 
   if (DO_HIT) {

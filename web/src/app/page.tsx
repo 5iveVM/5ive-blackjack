@@ -10,7 +10,7 @@ import {
   TransactionInstruction,
   type ConfirmOptions,
 } from "@solana/web3.js";
-import { FiveProgram, FiveSDK } from "@5ive-tech/sdk";
+import { FiveProgram, FiveSDK, SessionClient, scopeHashForFunctions } from "@5ive-tech/sdk";
 import { Navbar } from "@/components/layout/Navbar";
 import { PlayingCard } from "@/components/ui/PlayingCard";
 
@@ -63,67 +63,12 @@ const SESSION_TTL_SLOTS = Number(process.env.NEXT_PUBLIC_SESSION_TTL_SLOTS || "3
 const SESSION_DELEGATE_MIN_FEE_LAMPORTS = 500_000;
 const SESSION_DELEGATE_TOPUP_LAMPORTS = 2_000_000;
 
-function scopeHashForFunctions(functions: string[]): string {
-  const sorted = [...functions].sort();
-  let acc = 0n;
-  const mask = (1n << 64n) - 1n;
-  for (const ch of sorted.join("|")) {
-    acc = (acc * 131n + BigInt(ch.charCodeAt(0))) & mask;
-  }
-  return acc.toString();
-}
-
-function canonicalSessionManagerScriptAccount(vmProgramId: string): string {
-  const [scriptPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("session_v1", "utf-8")],
-    new PublicKey(vmProgramId)
-  );
-  return scriptPda.toBase58();
-}
-
 const SESSION_SCOPE_HASH = scopeHashForFunctions(["hit", "stand_and_settle"]);
 
 const DEFAULT_VM_PROGRAM_ID =
-  process.env.NEXT_PUBLIC_FIVE_VM_PROGRAM_ID || "5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst";
+  process.env.NEXT_PUBLIC_FIVE_VM_PROGRAM_ID || "5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd";
 const DEFAULT_SCRIPT_ACCOUNT = process.env.NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT || "";
 const DEFAULT_RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || "https://api.devnet.solana.com";
-
-const SESSION_MANAGER_ABI = {
-  name: "SessionManager",
-  functions: [
-    {
-      name: "create_session",
-      index: 0,
-      parameters: [
-        { name: "session", type: "Account", is_account: true, attributes: ["mut"] },
-        { name: "authority", type: "Account", is_account: true, attributes: ["signer"] },
-        { name: "delegate", type: "Account", is_account: true, attributes: [] },
-        { name: "target_program", type: "pubkey", is_account: false, attributes: [] },
-        { name: "expires_at_slot", type: "u64", is_account: false, attributes: [] },
-        { name: "scope_hash", type: "u64", is_account: false, attributes: [] },
-        { name: "bind_account", type: "pubkey", is_account: false, attributes: [] },
-        { name: "nonce", type: "u64", is_account: false, attributes: [] },
-        { name: "manager_script_account", type: "pubkey", is_account: false, attributes: [] },
-        { name: "manager_code_hash", type: "pubkey", is_account: false, attributes: [] },
-        { name: "manager_version", type: "u8", is_account: false, attributes: [] },
-      ],
-      return_type: null,
-      is_public: true,
-      bytecode_offset: 0,
-    },
-    {
-      name: "revoke_session",
-      index: 1,
-      parameters: [
-        { name: "session", type: "Account", is_account: true, attributes: ["mut"] },
-        { name: "authority", type: "Account", is_account: true, attributes: ["signer"] },
-      ],
-      return_type: null,
-      is_public: true,
-      bytecode_offset: 0,
-    },
-  ],
-} as const;
 
 function decodeBase64ToBytes(base64: string): Uint8Array {
   const raw = atob(base64);
@@ -318,7 +263,7 @@ export default function Home() {
   function resolveSessionManagerScriptAccount(): string {
     const explicit = process.env.NEXT_PUBLIC_SESSION_MANAGER_SCRIPT_ACCOUNT || "";
     if (explicit) return explicit;
-    return canonicalSessionManagerScriptAccount(vmProgramId);
+    return SessionClient.canonicalManagerScriptAccount(vmProgramId);
   }
 
   async function sendAndConfirm(
@@ -458,6 +403,9 @@ export default function Home() {
         sessionAccountByFunction: {
           [functionName]: sessionState!.sessionAccount!.publicKey.toBase58(),
         },
+        delegateSignerByFunction: {
+          [functionName]: sessionState!.delegate!,
+        },
       });
     }
 
@@ -498,48 +446,6 @@ export default function Home() {
     });
 
     return ix;
-  }
-
-  async function buildSessionInstruction(
-    functionName: "create_session" | "revoke_session",
-    args: Record<string, unknown>,
-    sessionState: SessionState
-  ): Promise<TransactionInstruction> {
-    if (!wallet.publicKey) throw new Error("Connect wallet first.");
-    const managerScriptAccount = sessionState.managerScriptAccount || resolveSessionManagerScriptAccount();
-    const program = FiveProgram.fromABI(managerScriptAccount, SESSION_MANAGER_ABI as any, {
-      fiveVMProgramId: vmProgramId,
-    });
-    const walletPk = wallet.publicKey.toBase58();
-
-    const accountMapByFunction: Record<string, Record<string, string>> = {
-      create_session: {
-        session: sessionState.sessionAccount?.publicKey.toBase58() || "",
-        authority: walletPk,
-        delegate: sessionState.delegate?.publicKey.toBase58() || "",
-      },
-      revoke_session: {
-        session: sessionState.sessionAccount?.publicKey.toBase58() || "",
-        authority: walletPk,
-      },
-    };
-
-    let builder = program
-      .function(functionName)
-      .payer(walletPk)
-      .accounts(accountMapByFunction[functionName]);
-    if (Object.keys(args).length > 0) builder = builder.args(args);
-
-    const encoded = await builder.instruction();
-    return new TransactionInstruction({
-      programId: new PublicKey(encoded.programId),
-      keys: encoded.keys.map((k: { pubkey: string; isSigner: boolean; isWritable: boolean }) => ({
-        pubkey: new PublicKey(k.pubkey),
-        isSigner: k.isSigner,
-        isWritable: k.isWritable,
-      })),
-      data: Buffer.from(decodeBase64ToBytes(encoded.data)),
-    });
   }
 
   async function callAction(functionName: "start_round" | "hit" | "stand_and_settle", args: Record<string, unknown>) {
@@ -634,25 +540,28 @@ export default function Home() {
             lamports: SESSION_DELEGATE_TOPUP_LAMPORTS,
           });
 
-    const initSessionIx = await buildSessionInstruction(
-      "create_session",
+    const sessionClient = new SessionClient({
+      vmProgramId,
+      managerScriptAccount,
+    });
+    await sessionClient.createSessionWithCompat(
       {
-        target_program: scriptAccount,
-        expires_at_slot: expiresAtSlot,
-        scope_hash: SESSION_SCOPE_HASH,
-        bind_account: resolved.player,
+        authority: wallet.publicKey.toBase58(),
+        delegate: delegate.publicKey.toBase58(),
+        targetProgram: scriptAccount,
+        expiresAtSlot,
+        scopeHash: SESSION_SCOPE_HASH,
+        bindAccount: resolved.player,
         nonce: syncedNonce,
-        manager_script_account: managerScriptAccount,
-        manager_code_hash: "11111111111111111111111111111111",
-        manager_version: 1,
+        compatMode: "auto",
       },
-      sessionDraft
+      async (sessionIx) => {
+        const tx = new Transaction().add(createIx);
+        if (topupIx) tx.add(topupIx);
+        tx.add(sessionIx);
+        return sendAndConfirm(tx, [sessionAccount]);
+      }
     );
-
-    const tx = new Transaction().add(createIx);
-    if (topupIx) tx.add(topupIx);
-    tx.add(initSessionIx);
-    await sendAndConfirm(tx, [sessionAccount]);
     setSession({
       delegate,
       sessionAccount,
@@ -664,8 +573,19 @@ export default function Home() {
   }
 
   async function revokeSession() {
-    if (!session.sessionAccount) throw new Error("No session to revoke.");
-    const revokeIx = await buildSessionInstruction("revoke_session", {}, session);
+    if (!session.sessionAccount || !session.delegate || !wallet.publicKey) {
+      throw new Error("No session to revoke.");
+    }
+    const sessionClient = new SessionClient({
+      vmProgramId,
+      managerScriptAccount: session.managerScriptAccount || resolveSessionManagerScriptAccount(),
+    });
+    const revokeIx = await sessionClient.revokeSessionIx({
+      authority: wallet.publicKey.toBase58(),
+      delegate: session.delegate.publicKey.toBase58(),
+      targetProgram: scriptAccount,
+      payer: wallet.publicKey.toBase58(),
+    });
     await sendAndConfirm(new Transaction().add(revokeIx));
     setSession((prev) => ({ ...prev, status: "revoked" }));
   }
