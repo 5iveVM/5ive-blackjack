@@ -13,13 +13,14 @@ interface PlayingCardProps {
   suitLabel: string;
   hidden: boolean;
   index: number;
+  className?: string;
 }
 
-export function PlayingCard({ rankLabel, suitLabel, hidden, index }: PlayingCardProps) {
+export function PlayingCard({ rankLabel, suitLabel, hidden, index, className }: PlayingCardProps) {
   const isRed = suitLabel === "♥" || suitLabel === "♦";
   
   return (
-    <div style={{ perspective: 1000 }} className="w-20 h-28 shrink-0">
+    <div style={{ perspective: 1000 }} className={cn("w-14 h-20 sm:w-16 sm:h-24 md:w-20 md:h-28 shrink-0", className)}>
       <motion.div
         className="w-full h-full relative"
         initial={{ rotateY: 180, y: -50, opacity: 0 }}
@@ -40,9 +41,9 @@ export function PlayingCard({ rankLabel, suitLabel, hidden, index }: PlayingCard
           )}
           style={{ backfaceVisibility: "hidden" }}
         >
-          <div className="text-sm font-bold leading-none tracking-tighter">{rankLabel}</div>
-          <div className="text-4xl self-center drop-shadow-sm">{suitLabel}</div>
-          <div className="text-sm font-bold leading-none tracking-tighter rotate-180 self-end">{rankLabel}</div>
+          <div className="text-[10px] sm:text-xs md:text-sm font-bold leading-none tracking-tighter">{rankLabel}</div>
+          <div className="text-2xl sm:text-3xl md:text-4xl self-center drop-shadow-sm">{suitLabel}</div>
+          <div className="text-[10px] sm:text-xs md:text-sm font-bold leading-none tracking-tighter rotate-180 self-end">{rankLabel}</div>
         </div>
 
         {/* Back */}
@@ -52,7 +53,7 @@ export function PlayingCard({ rankLabel, suitLabel, hidden, index }: PlayingCard
         >
           <div className="w-full h-full bg-[radial-gradient(circle_at_50%_0%,_rgba(157,78,221,0.3)_0%,_transparent_70%)] flex items-center justify-center p-1">
              <div className="w-full h-full border border-white/10 rounded-lg flex items-center justify-center bg-black/20 backdrop-blur-sm">
-                <span className="text-lg font-black italic tracking-widest text-transparent bg-clip-text bg-gradient-to-br from-purple-400 to-pink-300 drop-shadow-[0_0_10px_rgba(224,170,255,0.5)]">
+                <span className="text-sm sm:text-base md:text-lg font-black italic tracking-widest text-transparent bg-clip-text bg-gradient-to-br from-purple-400 to-pink-300 drop-shadow-[0_0_10px_rgba(224,170,255,0.5)]">
                   5.
                 </span>
              </div>

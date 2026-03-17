@@ -13,7 +13,7 @@ cp web/.env.example web/.env.local
 npm run web:dev
 ```
 
-Then open `http://localhost:3000`.
+Then open `http://localhost:3000` (or the next available port).
 
 ## Notes
 
@@ -36,3 +36,5 @@ From `5ive-blackjack/web`:
 npm run build
 npm run deploy:pages
 ```
+
+Current Pages project target: `5iveblackjack`.

@@ -7,7 +7,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "deploy:pages": "npx wrangler pages deploy out --project-name 5ive-blackjack",
+    "deploy:pages": "npx wrangler pages deploy out --project-name 5iveblackjack",
     "sync:artifact": "node scripts/sync-artifact.mjs",
     "predev": "npm run sync:artifact",
     "prebuild": "npm run sync:artifact"
