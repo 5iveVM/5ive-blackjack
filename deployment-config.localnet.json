@@ -1,7 +1,7 @@
 {
   "network": "localnet",
   "rpcUrl": "http://127.0.0.1:8899",
-  "fiveProgramId": "5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd",
+  "fiveProgramId": "5ive5hbC3aRsvq37MP5m4sHtTSFxT4Cq1smS4ddyWJ6h",
   "vmStatePda": "<SET_AFTER_VM_INIT>",
   "blackjackScriptAccount": "<SET_AFTER_BLACKJACK_DEPLOY>",
   "updatedAt": "2026-03-11T00:00:00Z"
