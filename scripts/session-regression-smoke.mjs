@@ -12,7 +12,7 @@ import {
 } from '../../five-cli/node_modules/@solana/web3.js/lib/index.cjs.js';
 import { FiveProgram, FiveSDK } from '../../five-sdk/dist/index.js';
 
-const DEFAULT_VM_PROGRAM_ID = '5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd';
+const DEFAULT_VM_PROGRAM_ID = '5ive5hbC3aRsvq37MP5m4sHtTSFxT4Cq1smS4ddyWJ6h';
 const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 const SESSION_SCOPE_HASH = scopeHashForFunctions(['hit', 'stand_and_settle']);
 
