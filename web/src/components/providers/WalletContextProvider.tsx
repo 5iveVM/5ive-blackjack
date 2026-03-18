@@ -14,17 +14,17 @@ export type NetworkName = "devnet" | "mainnet";
 type NetworkContextValue = {
   network: NetworkName;
   endpoint: string;
+  displayEndpoint: string;
   setNetwork: (network: NetworkName) => void;
 };
 
 const DEVNET_ENDPOINT =
-  process.env.NEXT_PUBLIC_DEVNET_RPC_URL ||
-  (process.env.NEXT_PUBLIC_RPC_URL?.includes("devnet") ? process.env.NEXT_PUBLIC_RPC_URL : "") ||
   "https://api.devnet.solana.com";
-const MAINNET_ENDPOINT =
-  process.env.NEXT_PUBLIC_MAINNET_RPC_URL ||
-  (process.env.NEXT_PUBLIC_RPC_URL?.includes("mainnet") ? process.env.NEXT_PUBLIC_RPC_URL : "") ||
-  "https://api.mainnet-beta.solana.com";
+const DEVNET_WS_ENDPOINT = "wss://api.devnet.solana.com/";
+const DEVNET_PROXY_PATH = "/api/solana-devnet";
+const MAINNET_DISPLAY_ENDPOINT = "https://api.mainnet-beta.solana.com";
+const MAINNET_WS_ENDPOINT = "wss://api.mainnet-beta.solana.com/";
+const MAINNET_PROXY_PATH = "/api/solana-mainnet";
 const DEFAULT_NETWORK: NetworkName =
   process.env.NEXT_PUBLIC_DEFAULT_NETWORK === "mainnet" ||
   process.env.NEXT_PUBLIC_RPC_URL?.includes("mainnet")
@@ -33,6 +33,16 @@ const DEFAULT_NETWORK: NetworkName =
 const NETWORK_STORAGE_KEY = "five-blackjack-network";
 
 const NetworkContext = createContext<NetworkContextValue | null>(null);
+
+function resolveMainnetRpcEndpoint(): string {
+  if (typeof window === "undefined") return MAINNET_DISPLAY_ENDPOINT;
+  return new URL(MAINNET_PROXY_PATH, window.location.origin).toString();
+}
+
+function resolveDevnetRpcEndpoint(): string {
+  if (typeof window === "undefined") return DEVNET_ENDPOINT;
+  return new URL(DEVNET_PROXY_PATH, window.location.origin).toString();
+}
 
 function isUserRejectedWalletAction(error: WalletError): boolean {
   return /user rejected|rejected the request|declined|cancelled/i.test(error.message);
@@ -47,7 +57,15 @@ export function useNetworkConfig(): NetworkContextValue {
 export function WalletContextProvider({ children }: { children: React.ReactNode }) {
   const [network, setNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const endpoint = useMemo(
-    () => (network === "mainnet" ? MAINNET_ENDPOINT : DEVNET_ENDPOINT),
+    () => (network === "mainnet" ? resolveMainnetRpcEndpoint() : resolveDevnetRpcEndpoint()),
+    [network]
+  );
+  const wsEndpoint = useMemo(
+    () => (network === "mainnet" ? MAINNET_WS_ENDPOINT : DEVNET_WS_ENDPOINT),
+    [network]
+  );
+  const displayEndpoint = useMemo(
+    () => (network === "mainnet" ? MAINNET_DISPLAY_ENDPOINT : DEVNET_ENDPOINT),
     [network]
   );
 
@@ -67,8 +85,8 @@ export function WalletContextProvider({ children }: { children: React.ReactNode 
 
   const wallets = useMemo(() => [new PhantomWalletAdapter()], []);
   const value = useMemo(
-    () => ({ network, endpoint, setNetwork }),
-    [network, endpoint]
+    () => ({ network, endpoint, displayEndpoint, setNetwork }),
+    [network, endpoint, displayEndpoint]
   );
   const onWalletError = (error: WalletError, adapter?: Adapter) => {
     if (isUserRejectedWalletAction(error)) return;
@@ -81,7 +99,7 @@ export function WalletContextProvider({ children }: { children: React.ReactNode 
 
   return (
     <NetworkContext.Provider value={value}>
-      <ConnectionProvider endpoint={endpoint}>
+      <ConnectionProvider endpoint={endpoint} config={{ wsEndpoint }}>
         <WalletProvider wallets={wallets} autoConnect onError={onWalletError}>
           <WalletModalProvider>{children}</WalletModalProvider>
         </WalletProvider>

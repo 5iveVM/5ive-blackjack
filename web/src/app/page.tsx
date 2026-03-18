@@ -467,7 +467,7 @@ function isUserRejectedWalletAction(message: string): boolean {
 export default function Home() {
   const { connection } = useConnection();
   const wallet = useWallet();
-  const { network, endpoint } = useNetworkConfig();
+  const { network, displayEndpoint } = useNetworkConfig();
 
   const [status, setStatus] = useState("ready");
   const [lastTxError, setLastTxError] = useState<string | null>(null);
@@ -902,7 +902,7 @@ export default function Home() {
       bindAccount: resolved.player,
       nonce: syncedNonce,
       payer: wallet.publicKey.toBase58(),
-      rpcLabel: endpoint,
+      rpcLabel: displayEndpoint,
     };
 
     const sessionClientMaybePlan = sessionClient as unknown as SessionClientWithPlanBuilder;
@@ -913,7 +913,7 @@ export default function Home() {
         payer: wallet.publicKey,
         delegateMinLamports: SESSION_DELEGATE_MIN_FEE_LAMPORTS,
         delegateTopupLamports: SESSION_DELEGATE_TOPUP_LAMPORTS,
-        rpcLabel: endpoint,
+        rpcLabel: displayEndpoint,
       });
       const tx = new Transaction();
       if (plan.createSessionAccountIx) tx.add(plan.createSessionAccountIx);
@@ -1374,7 +1374,7 @@ export default function Home() {
               <div>vm: {vmProgramId}</div>
               <div>script: {scriptAccount || "MISSING NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT_DEVNET/MAINNET"}</div>
               <div>network: {network}</div>
-              <div>rpc: {endpoint}</div>
+              <div>rpc: {displayEndpoint}</div>
               <div>round_status: {outcomeLabel(state.outcome)}</div>
               <div className="break-words whitespace-pre-wrap text-rose-300/90">
                 last_error: {lastTxError || "none"}
