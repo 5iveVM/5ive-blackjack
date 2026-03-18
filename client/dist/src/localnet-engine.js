@@ -3,7 +3,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, } from '@solana/web3.js';
-import { FiveProgram, FiveSDK } from '@5ive-tech/sdk';
+import { FiveProgram, FiveSDK, SessionClient, scopeHashForFunctions } from '@5ive-tech/sdk';
 const ROUND_IDLE = 0;
 const ROUND_ACTIVE = 1;
 const ROUND_PLAYER_BUST = 2;
@@ -12,19 +12,6 @@ const ROUND_PLAYER_WIN = 4;
 const ROUND_DEALER_WIN = 5;
 const ROUND_PUSH = 6;
 const SESSION_ACCOUNT_SPACE = 256;
-function scopeHashForFunctions(functions) {
-    const sorted = [...functions].sort();
-    let acc = 0n;
-    const mask = (1n << 64n) - 1n;
-    for (const ch of sorted.join('|')) {
-        acc = (acc * 131n + BigInt(ch.charCodeAt(0))) & mask;
-    }
-    return acc.toString();
-}
-function canonicalSessionManagerScriptAccount(vmProgramId) {
-    const [scriptPda] = PublicKey.findProgramAddressSync([Buffer.from('session_v1', 'utf-8')], new PublicKey(vmProgramId));
-    return scriptPda.toBase58();
-}
 const SESSION_SCOPE_HASH = scopeHashForFunctions(['hit', 'stand_and_settle']);
 const CONFIRM = {
     commitment: 'confirmed',
@@ -282,7 +269,7 @@ export class LocalnetBlackjackEngine {
         const artifactText = await readFile(artifactPath, 'utf8');
         const loaded = await FiveSDK.loadFiveFile(artifactText);
         const rpcUrl = process.env.FIVE_RPC_URL || 'http://127.0.0.1:8899';
-        const fiveVmProgramId = process.env.FIVE_VM_PROGRAM_ID || '5ive58PJUPaTyAe7tvU1bvBi25o7oieLLTRsJDoQNJst';
+        const fiveVmProgramId = process.env.FIVE_VM_PROGRAM_ID || '5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd';
         const connection = new Connection(rpcUrl, 'confirmed');
         const payer = await loadPayer();
         await connection.getLatestBlockhash('confirmed');
@@ -306,7 +293,7 @@ export class LocalnetBlackjackEngine {
         const delegate = Keypair.generate();
         const sessionAccount = Keypair.generate();
         const sessionManagerScriptAccount = process.env.FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT ||
-            canonicalSessionManagerScriptAccount(fiveVmProgramId);
+            SessionClient.canonicalManagerScriptAccount(fiveVmProgramId);
         await ensureSessionManagerDeployment(connection, payer, fiveVmProgramId, sessionManagerScriptAccount, projectRoot);
         const setupSteps = [];
         setupSteps.push(await createOwnedAccount(connection, payer, tableAccount, ownerProgram, 256));
