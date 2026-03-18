@@ -1,18 +1,27 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import {
+  type Connection,
   Keypair,
   PublicKey,
   SystemProgram,
   Transaction,
   TransactionInstruction,
   type ConfirmOptions,
+  type TransactionSignature,
 } from "@solana/web3.js";
-import { FiveProgram, FiveSDK, SessionClient, scopeHashForFunctions } from "@5ive-tech/sdk";
+import {
+  FiveProgram,
+  FiveSDK,
+  SessionClient,
+  scopeHashForFunctions,
+  type CreateSessionParams,
+} from "@5ive-tech/sdk";
 import { Navbar } from "@/components/layout/Navbar";
 import { PlayingCard } from "@/components/ui/PlayingCard";
+import { useNetworkConfig, type NetworkName } from "@/components/providers/WalletContextProvider";
 
 type GameAccounts = {
   table: string;
@@ -22,7 +31,7 @@ type GameAccounts = {
 
 type SessionState = {
   delegate: Keypair | null;
-  sessionAccount: Keypair | null;
+  sessionAccount: PublicKey | null;
   status: "unknown" | "active" | "revoked" | "expired";
   nonce: number;
   expiresAtSlot: number | null;
@@ -30,6 +39,26 @@ type SessionState = {
 };
 
 type PlayMode = "direct" | "session";
+type SessionConfig = Parameters<FiveProgram["withSession"]>[0];
+type SessionPlan = {
+  schema: "legacy" | "minimal";
+  sessionAddress: string;
+  createSessionIx: TransactionInstruction;
+  createSessionAccountIx: TransactionInstruction | null;
+  topupDelegateIx: TransactionInstruction | null;
+};
+type SessionClientWithPlanBuilder = SessionClient & {
+  buildCreateSessionPlan: (
+    params: CreateSessionParams,
+    options: {
+      connection: Connection;
+      payer: PublicKey;
+      delegateMinLamports: number;
+      delegateTopupLamports: number;
+      rpcLabel?: string;
+    }
+  ) => Promise<SessionPlan>;
+};
 
 type GameState = {
   chips: number;
@@ -60,7 +89,6 @@ const ROUND_DEALER_BUST = 3;
 const ROUND_PLAYER_WIN = 4;
 const ROUND_DEALER_WIN = 5;
 const ROUND_PUSH = 6;
-const SESSION_ACCOUNT_SPACE = 256;
 const SESSION_TTL_SLOTS = Number(process.env.NEXT_PUBLIC_SESSION_TTL_SLOTS || "3000");
 const SESSION_DELEGATE_MIN_FEE_LAMPORTS = 500_000;
 const SESSION_DELEGATE_TOPUP_LAMPORTS = 2_000_000;
@@ -70,8 +98,33 @@ const SESSION_SCOPE_HASH = process.env.NEXT_PUBLIC_SESSION_SCOPE_HASH || DEFAULT
 
 const DEFAULT_VM_PROGRAM_ID =
   process.env.NEXT_PUBLIC_FIVE_VM_PROGRAM_ID || "5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd";
-const DEFAULT_SCRIPT_ACCOUNT = process.env.NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT || "";
-const DEFAULT_RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || "https://api.devnet.solana.com";
+const DEVNET_SCRIPT_ACCOUNT =
+  process.env.NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT_DEVNET ||
+  process.env.NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT ||
+  "";
+const MAINNET_SCRIPT_ACCOUNT =
+  process.env.NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT_MAINNET ||
+  process.env.NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT ||
+  "";
+const ACCOUNTS_STORAGE_PREFIX = "five-blackjack-accounts";
+const SESSION_STORAGE_PREFIX = "five-blackjack-session";
+const SESSION_MANAGER_REVOKE_ABI = {
+  name: "SessionManager",
+  functions: [
+    {
+      name: "revoke_session",
+      index: 1,
+      parameters: [
+        { name: "session", type: "Account", is_account: true, attributes: ["mut"] },
+        { name: "authority", type: "Account", is_account: true, attributes: ["signer"] },
+      ],
+      return_type: null,
+      visibility: "public",
+      is_public: true,
+      bytecode_offset: 0,
+    },
+  ],
+};
 
 function decodeBase64ToBytes(base64: string): Uint8Array {
   const raw = atob(base64);
@@ -89,12 +142,228 @@ function readU64Le(bytes: Uint8Array, offset: number): bigint {
   return value;
 }
 
+function readBool(bytes: Uint8Array, offset: number): boolean {
+  if (bytes.length < offset + 1) throw new Error("account data too short for bool read");
+  return bytes[offset] !== 0;
+}
+
+function readPlayerSnapshot(bytes: Uint8Array): {
+  chips: number;
+  activeBet: number;
+  handTotal: number;
+  dealerTotal: number;
+  roundStatus: number;
+  outcome: number;
+  inRound: boolean;
+} {
+  // PlayerState layout:
+  // owner(32), chips(8), active_bet(8), hand_total(8), dealer_total(8),
+  // round_status(8), outcome(8), session_nonce(8), in_round(1)
+  const chips = Number(readU64Le(bytes, 32));
+  const activeBet = Number(readU64Le(bytes, 40));
+  const handTotal = Number(readU64Le(bytes, 48));
+  const dealerTotal = Number(readU64Le(bytes, 56));
+  const roundStatus = Number(readU64Le(bytes, 64));
+  const outcome = Number(readU64Le(bytes, 72));
+  const inRound = readBool(bytes, 88);
+  return { chips, activeBet, handTotal, dealerTotal, roundStatus, outcome, inRound };
+}
+
+function readRoundSnapshot(bytes: Uint8Array): {
+  deckSeed: number;
+  ownerMarker: number;
+  drawCursor: number;
+  playerCardCount: number;
+  dealerCardCount: number;
+  playerSoftAces: number;
+  dealerSoftAces: number;
+} {
+  return {
+    deckSeed: Number(readU64Le(bytes, 0)),
+    ownerMarker: Number(readU64Le(bytes, 8)),
+    drawCursor: Number(readU64Le(bytes, 16)),
+    playerCardCount: Number(readU64Le(bytes, 24)),
+    dealerCardCount: Number(readU64Le(bytes, 32)),
+    playerSoftAces: Number(readU64Le(bytes, 40)),
+    dealerSoftAces: Number(readU64Le(bytes, 48)),
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function parseEnvAccounts(): GameAccounts | null {
   const table = process.env.NEXT_PUBLIC_BJ_TABLE_ACCOUNT || "";
   const player = process.env.NEXT_PUBLIC_BJ_PLAYER_ACCOUNT || "";
   const round = process.env.NEXT_PUBLIC_BJ_ROUND_ACCOUNT || "";
   if (!table || !player || !round) return null;
   return { table, player, round };
+}
+
+function accountsStorageKey(input: {
+  network: NetworkName | "localnet";
+  wallet: string;
+  vmProgramId: string;
+  scriptAccount: string;
+}): string {
+  return `${ACCOUNTS_STORAGE_PREFIX}:${input.network}:${input.wallet}:${input.vmProgramId}:${input.scriptAccount}`;
+}
+
+function sessionStorageKey(input: {
+  network: NetworkName | "localnet";
+  wallet: string;
+  vmProgramId: string;
+  scriptAccount: string;
+}): string {
+  return `${SESSION_STORAGE_PREFIX}:${input.network}:${input.wallet}:${input.vmProgramId}:${input.scriptAccount}`;
+}
+
+function readStoredAccounts(input: {
+  network: NetworkName | "localnet";
+  wallet: string | null;
+  vmProgramId: string;
+  scriptAccount: string;
+}): GameAccounts | null {
+  if (typeof window === "undefined") return null;
+  if (input.network === "localnet") return null;
+  if (!input.wallet || !input.scriptAccount) return null;
+  const raw = window.localStorage.getItem(
+    accountsStorageKey({
+      network: input.network,
+      wallet: input.wallet,
+      vmProgramId: input.vmProgramId,
+      scriptAccount: input.scriptAccount,
+    })
+  );
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<GameAccounts>;
+    if (!parsed.table || !parsed.player || !parsed.round) return null;
+    return { table: parsed.table, player: parsed.player, round: parsed.round };
+  } catch {
+    return null;
+  }
+}
+
+function persistAccounts(input: {
+  network: NetworkName | "localnet";
+  wallet: string | null;
+  vmProgramId: string;
+  scriptAccount: string;
+  accounts: GameAccounts;
+}) {
+  if (typeof window === "undefined") return;
+  if (input.network === "localnet") return;
+  if (!input.wallet || !input.scriptAccount) return;
+  window.localStorage.setItem(
+    accountsStorageKey({
+      network: input.network,
+      wallet: input.wallet,
+      vmProgramId: input.vmProgramId,
+      scriptAccount: input.scriptAccount,
+    }),
+    JSON.stringify(input.accounts)
+  );
+}
+
+function emptySessionState(): SessionState {
+  return {
+    delegate: null,
+    sessionAccount: null,
+    status: "unknown",
+    nonce: 0,
+    expiresAtSlot: null,
+    managerScriptAccount: "",
+  };
+}
+
+function readStoredSession(input: {
+  network: NetworkName | "localnet";
+  wallet: string | null;
+  vmProgramId: string;
+  scriptAccount: string;
+}): SessionState | null {
+  if (typeof window === "undefined") return null;
+  if (input.network === "localnet") return null;
+  if (!input.wallet || !input.scriptAccount) return null;
+  const raw = window.localStorage.getItem(
+    sessionStorageKey({
+      network: input.network,
+      wallet: input.wallet,
+      vmProgramId: input.vmProgramId,
+      scriptAccount: input.scriptAccount,
+    })
+  );
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as {
+      delegateSecretKey?: number[];
+      sessionAccount?: string | null;
+      status?: SessionState["status"];
+      nonce?: number;
+      expiresAtSlot?: number | null;
+      managerScriptAccount?: string;
+    };
+    const delegate =
+      Array.isArray(parsed.delegateSecretKey) && parsed.delegateSecretKey.length > 0
+        ? Keypair.fromSecretKey(Uint8Array.from(parsed.delegateSecretKey))
+        : null;
+    const sessionAccount =
+      typeof parsed.sessionAccount === "string" && parsed.sessionAccount.length > 0
+        ? new PublicKey(parsed.sessionAccount)
+        : null;
+    return {
+      delegate,
+      sessionAccount,
+      status: parsed.status || "unknown",
+      nonce: Number(parsed.nonce || 0),
+      expiresAtSlot: parsed.expiresAtSlot ?? null,
+      managerScriptAccount: parsed.managerScriptAccount || "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistSession(input: {
+  network: NetworkName | "localnet";
+  wallet: string | null;
+  vmProgramId: string;
+  scriptAccount: string;
+  session: SessionState;
+}) {
+  if (typeof window === "undefined") return;
+  if (input.network === "localnet") return;
+  if (!input.wallet || !input.scriptAccount) return;
+  const isEmpty =
+    !input.session.delegate &&
+    !input.session.sessionAccount &&
+    input.session.status === "unknown" &&
+    input.session.nonce === 0 &&
+    !input.session.expiresAtSlot &&
+    !input.session.managerScriptAccount;
+  const key = sessionStorageKey({
+    network: input.network,
+    wallet: input.wallet,
+    vmProgramId: input.vmProgramId,
+    scriptAccount: input.scriptAccount,
+  });
+  if (isEmpty) {
+    window.localStorage.removeItem(key);
+    return;
+  }
+  window.localStorage.setItem(
+    key,
+    JSON.stringify({
+      delegateSecretKey: input.session.delegate ? Array.from(input.session.delegate.secretKey) : null,
+      sessionAccount: input.session.sessionAccount?.toBase58() || null,
+      status: input.session.status,
+      nonce: input.session.nonce,
+      expiresAtSlot: input.session.expiresAtSlot,
+      managerScriptAccount: input.session.managerScriptAccount,
+    })
+  );
 }
 
 async function loadProgram(scriptAccount: string, vmProgramId: string) {
@@ -144,29 +413,6 @@ function cardRank(seed: number, cursor: number, marker: number): number {
   return ((seed + cursor * 17 + marker * 31 + 7) % 13) + 1;
 }
 
-function cardValue(rank: number): number {
-  if (rank === 1) return 11;
-  if (rank >= 10) return 10;
-  return rank;
-}
-
-function addCard(total: number, softAces: number, seed: number, cursor: number, marker: number) {
-  const rank = cardRank(seed, cursor, marker);
-  let nextTotal = total + cardValue(rank);
-  let nextSoftAces = softAces + (rank === 1 ? 1 : 0);
-  while (nextTotal > 21 && nextSoftAces > 0) {
-    nextTotal -= 10;
-    nextSoftAces -= 1;
-  }
-  return { rank, total: nextTotal, softAces: nextSoftAces, cursor: cursor + 1 };
-}
-
-function dealerShouldDraw(total: number, softAces: number, soft17Hits: boolean): boolean {
-  if (total < 17) return true;
-  if (soft17Hits && total === 17 && softAces > 0) return true;
-  return false;
-}
-
 function suitFor(index: number, seed: number): string {
   const suits = ["♠", "♥", "♦", "♣"];
   return suits[Math.abs((seed + index * 3) % 4)];
@@ -214,42 +460,90 @@ function shortKey(value: string): string {
   return value.length > 14 ? `${value.slice(0, 6)}...${value.slice(-6)}` : value;
 }
 
+function isUserRejectedWalletAction(message: string): boolean {
+  return /user rejected|rejected the request|declined|cancelled/i.test(message);
+}
+
 export default function Home() {
   const { connection } = useConnection();
   const wallet = useWallet();
+  const { network, endpoint } = useNetworkConfig();
 
   const [status, setStatus] = useState("ready");
+  const [lastTxError, setLastTxError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [bet, setBet] = useState(25);
-  const [accounts, setAccounts] = useState<GameAccounts | null>(parseEnvAccounts());
+  const [accounts, setAccounts] = useState<GameAccounts | null>(null);
   const [sigs, setSigs] = useState<string[]>([]);
   const [state, setState] = useState<GameState>(initialState());
-  const [session, setSession] = useState<SessionState>({
-    delegate: null,
-    sessionAccount: null,
-    status: "unknown",
-    nonce: 0,
-    expiresAtSlot: null,
-    managerScriptAccount: "",
-  });
+  const [session, setSession] = useState<SessionState>(emptySessionState());
   const [playMode, setPlayMode] = useState<PlayMode>("direct");
+  const previousNetworkRef = useRef(network);
 
   const vmProgramId = useMemo(() => DEFAULT_VM_PROGRAM_ID, []);
-  const scriptAccount = useMemo(() => DEFAULT_SCRIPT_ACCOUNT, []);
-  const explorerPrefix = useMemo(() => {
-    const explicit = process.env.NEXT_PUBLIC_EXPLORER_BASE || "";
-    if (explicit) return explicit;
-    if (DEFAULT_RPC_URL.includes("devnet") || DEFAULT_RPC_URL.includes("mainnet")) {
-      return "https://explorer.solana.com/tx/";
-    }
+  const scriptAccount = useMemo(
+    () => (network === "mainnet" ? MAINNET_SCRIPT_ACCOUNT : DEVNET_SCRIPT_ACCOUNT),
+    [network]
+  );
+  const solscanClusterSuffix = useMemo(() => {
+    if (network === "devnet") return "?cluster=devnet";
     return "";
-  }, []);
-  const explorerSuffix = useMemo(() => {
-    if (DEFAULT_RPC_URL.includes("devnet")) return "?cluster=devnet";
-    return "";
-  }, []);
+  }, [network]);
 
   const walletConnected = !!wallet.connected && !!wallet.publicKey;
+  const walletBase58 = wallet.publicKey?.toBase58() || null;
+
+  useEffect(() => {
+    const fromStorage = readStoredAccounts({
+      network,
+      wallet: walletBase58,
+      vmProgramId,
+      scriptAccount,
+    });
+    const sessionFromStorage = readStoredSession({
+      network,
+      wallet: walletBase58,
+      vmProgramId,
+      scriptAccount,
+    });
+    setAccounts(fromStorage || parseEnvAccounts());
+    setSession(sessionFromStorage || emptySessionState());
+  }, [network, walletBase58, vmProgramId, scriptAccount]);
+
+  useEffect(() => {
+    if (previousNetworkRef.current === network) return;
+    previousNetworkRef.current = network;
+    const fromStorage = readStoredAccounts({
+      network,
+      wallet: walletBase58,
+      vmProgramId,
+      scriptAccount,
+    });
+    const sessionFromStorage = readStoredSession({
+      network,
+      wallet: walletBase58,
+      vmProgramId,
+      scriptAccount,
+    });
+    setAccounts(fromStorage || parseEnvAccounts());
+    setSigs([]);
+    setSession(sessionFromStorage || emptySessionState());
+    setState(initialState());
+    setPlayMode("direct");
+    setBusy(false);
+    setStatus(`switched to ${network}`);
+    setLastTxError(null);
+  }, [network, walletBase58, vmProgramId, scriptAccount]);
+
+  useEffect(() => {
+    persistSession({
+      network,
+      wallet: walletBase58,
+      vmProgramId,
+      scriptAccount,
+      session,
+    });
+  }, [network, walletBase58, vmProgramId, scriptAccount, session]);
 
   const pushSig = (sig: string) => setSigs((prev) => [sig, ...prev].slice(0, 6));
   const errText = (err: unknown): string => {
@@ -266,6 +560,16 @@ export default function Home() {
       }
     }
     return String(err);
+  };
+  const debugErrText = (err: unknown): string => {
+    const message = errText(err);
+    if (!err || typeof err !== "object") return message;
+    const rec = err as Record<string, unknown>;
+    const logs = rec.logs || rec.transactionLogs;
+    if (Array.isArray(logs) && logs.length > 0) {
+      return `${message}\n${logs.map((line) => String(line)).join("\n")}`;
+    }
+    return message;
   };
 
   function resolveSessionManagerScriptAccount(): string {
@@ -299,6 +603,9 @@ export default function Home() {
       }
     } catch (err) {
       const message = errText(err);
+      if (isUserRejectedWalletAction(message)) {
+        throw new Error("wallet request cancelled");
+      }
       throw new Error(`transaction submit failed: ${message}`);
     }
 
@@ -334,6 +641,13 @@ export default function Home() {
     await sendAndConfirm(tx, [table, player, round]);
     const next = { table: table.publicKey.toBase58(), player: player.publicKey.toBase58(), round: round.publicKey.toBase58() };
     setAccounts(next);
+    persistAccounts({
+      network,
+      wallet: wallet.publicKey.toBase58(),
+      vmProgramId,
+      scriptAccount,
+      accounts: next,
+    });
     return next;
   }
 
@@ -365,6 +679,13 @@ export default function Home() {
       setupSigners = [table, player, round];
       resolved = { table: table.publicKey.toBase58(), player: player.publicKey.toBase58(), round: round.publicKey.toBase58() };
       setAccounts(resolved);
+      persistAccounts({
+        network,
+        wallet: wallet.publicKey.toBase58(),
+        vmProgramId,
+        scriptAccount,
+        accounts: resolved,
+      });
     }
 
     if (!state.setupDone) {
@@ -392,7 +713,9 @@ export default function Home() {
     sessionState?: SessionState
   ): Promise<TransactionInstruction> {
     if (!wallet.publicKey) throw new Error("Connect wallet first.");
-    if (!scriptAccount) throw new Error("Set NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT in web/.env.local.");
+    if (!scriptAccount) {
+      throw new Error("Set NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT_DEVNET/MAINNET in web/.env.local.");
+    }
 
     let program = await loadProgram(scriptAccount, vmProgramId);
     const walletPk = wallet.publicKey.toBase58();
@@ -401,15 +724,15 @@ export default function Home() {
       ? sessionState!.delegate!.publicKey.toBase58()
       : walletPk;
     const sessionForSessionizedAction = delegatedSession
-      ? sessionState!.sessionAccount!.publicKey.toBase58()
+      ? sessionState!.sessionAccount!.toBase58()
       : walletPk;
     const vmPayer = delegatedSession ? ownerForSessionizedAction : walletPk;
     if ((functionName === "hit" || functionName === "stand_and_settle") && delegatedSession) {
       program = program.withSession({
         mode: "auto",
-        manager: { defaultTtlSlots: SESSION_TTL_SLOTS } as any,
+        manager: { defaultTtlSlots: SESSION_TTL_SLOTS } as SessionConfig["manager"],
         sessionAccountByFunction: {
-          [functionName]: sessionState!.sessionAccount!.publicKey.toBase58(),
+          [functionName]: sessionState!.sessionAccount!.toBase58(),
         },
         delegateSignerByFunction: {
           [functionName]: sessionState!.delegate!,
@@ -459,6 +782,27 @@ export default function Home() {
   async function callAction(functionName: "start_round" | "hit" | "stand_and_settle", args: Record<string, unknown>) {
     const resolved = await ensureInitialized();
     const sessionized = functionName === "hit" || functionName === "stand_and_settle";
+    if (sessionized) {
+      const playerInfo = await connection.getAccountInfo(new PublicKey(resolved.player), "confirmed");
+      if (!playerInfo?.data) throw new Error("player account not found");
+      const player = readPlayerSnapshot(playerInfo.data);
+      setState((prev) => ({
+        ...prev,
+        chips: player.chips,
+        activeBet: player.activeBet,
+        playerTotal: player.handTotal,
+        dealerTotal: player.dealerTotal,
+        inRound: player.inRound,
+        outcome: player.outcome,
+        dealerReveal: !player.inRound,
+      }));
+      if (!player.inRound || player.roundStatus !== ROUND_ACTIVE) {
+        await syncStateFromChain(resolved);
+        throw new Error(
+          `${functionName} blocked: round is not active on-chain (in_round=${player.inRound}, status=${player.roundStatus})`
+        );
+      }
+    }
 
     let extraSigners: Keypair[] = [];
     let mergedArgs = { ...args };
@@ -472,6 +816,7 @@ export default function Home() {
           feePayer: txFeePayer,
           requireWalletSignature,
         });
+        await syncStateFromChain(resolved);
         setSession((prev) => ({ ...prev, nonce: prev.nonce + 1 }));
         return;
       }
@@ -499,6 +844,7 @@ export default function Home() {
         feePayer: txFeePayer,
         requireWalletSignature,
       });
+      await syncStateFromChain(resolved);
       if (sessionized) {
         // PlayerState.session_nonce advances on-chain for hit/stand in both
         // direct-owner and delegated-session paths; keep local nonce in sync.
@@ -511,13 +857,17 @@ export default function Home() {
 
   async function createSession() {
     if (!wallet.publicKey) throw new Error("Connect wallet first.");
-    if (!scriptAccount) throw new Error("Set NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT in web/.env.local.");
+    if (!scriptAccount) {
+      throw new Error("Set NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT_DEVNET/MAINNET in web/.env.local.");
+    }
     const resolved = await ensureInitialized();
 
-    const owner = new PublicKey(vmProgramId);
     const delegate = session.delegate || Keypair.generate();
-    const sessionAccount = Keypair.generate();
     const managerScriptAccount = resolveSessionManagerScriptAccount();
+    const sessionClient = new SessionClient({
+      vmProgramId,
+      managerScriptAccount,
+    });
     const slot = await connection.getSlot("confirmed");
     const expiresAtSlot = slot + Math.max(1, SESSION_TTL_SLOTS);
 
@@ -532,23 +882,6 @@ export default function Home() {
       // Keep local nonce fallback if account read fails.
     }
 
-    const lamports = await connection.getMinimumBalanceForRentExemption(SESSION_ACCOUNT_SPACE);
-    const sessionDraft: SessionState = {
-      delegate,
-      sessionAccount,
-      status: "unknown",
-      nonce: syncedNonce,
-      expiresAtSlot,
-      managerScriptAccount,
-    };
-
-    const createIx = SystemProgram.createAccount({
-      fromPubkey: wallet.publicKey,
-      newAccountPubkey: sessionAccount.publicKey,
-      lamports,
-      space: SESSION_ACCOUNT_SPACE,
-      programId: owner,
-    });
     const delegateBalance = await connection.getBalance(delegate.publicKey, "confirmed");
     const topupIx =
       delegateBalance >= SESSION_DELEGATE_MIN_FEE_LAMPORTS
@@ -558,32 +891,86 @@ export default function Home() {
             toPubkey: delegate.publicKey,
             lamports: SESSION_DELEGATE_TOPUP_LAMPORTS,
           });
+    const legacySessionSigner = Keypair.generate();
+    const sessionParams: CreateSessionParams & { sessionAccount?: string; rpcLabel?: string } = {
+      authority: wallet.publicKey.toBase58(),
+      delegate: delegate.publicKey.toBase58(),
+      targetProgram: scriptAccount,
+      sessionAccount: legacySessionSigner.publicKey.toBase58(),
+      expiresAtSlot,
+      scopeHash: SESSION_SCOPE_HASH,
+      bindAccount: resolved.player,
+      nonce: syncedNonce,
+      payer: wallet.publicKey.toBase58(),
+      rpcLabel: endpoint,
+    };
 
-    const sessionClient = new SessionClient({
-      vmProgramId,
-      managerScriptAccount,
-    });
-    await sessionClient.createSessionWithCompat(
-      {
-        authority: wallet.publicKey.toBase58(),
-        delegate: delegate.publicKey.toBase58(),
-        targetProgram: scriptAccount,
-        expiresAtSlot,
-        scopeHash: SESSION_SCOPE_HASH,
-        bindAccount: resolved.player,
+    const sessionClientMaybePlan = sessionClient as unknown as SessionClientWithPlanBuilder;
+    const hasPlanBuilder = typeof sessionClientMaybePlan.buildCreateSessionPlan === "function";
+    if (hasPlanBuilder) {
+      const plan = await sessionClientMaybePlan.buildCreateSessionPlan(sessionParams, {
+        connection,
+        payer: wallet.publicKey,
+        delegateMinLamports: SESSION_DELEGATE_MIN_FEE_LAMPORTS,
+        delegateTopupLamports: SESSION_DELEGATE_TOPUP_LAMPORTS,
+        rpcLabel: endpoint,
+      });
+      const tx = new Transaction();
+      if (plan.createSessionAccountIx) tx.add(plan.createSessionAccountIx);
+      if (plan.topupDelegateIx) tx.add(plan.topupDelegateIx);
+      tx.add(plan.createSessionIx);
+      await sendAndConfirm(
+        tx,
+        plan.createSessionAccountIx ? [legacySessionSigner] : []
+      );
+      setSession({
+        delegate,
+        sessionAccount: new PublicKey(plan.sessionAddress),
+        status: "active",
         nonce: syncedNonce,
-        compatMode: "auto",
-      },
-      async (sessionIx) => {
-        const tx = new Transaction().add(createIx);
-        if (topupIx) tx.add(topupIx);
-        tx.add(sessionIx);
-        return sendAndConfirm(tx, [sessionAccount]);
-      }
+        expiresAtSlot,
+        managerScriptAccount,
+      });
+      return;
+    }
+
+    const compatResult = await sessionClient.createSessionWithCompat(
+        sessionParams,
+        async (sessionIx, schema): Promise<TransactionSignature> => {
+          const tx = new Transaction();
+          let extraSigners: Keypair[] = [];
+          if (schema === "legacy") {
+            const prepared = await sessionClient.prepareSessionAccountTx({
+              connection,
+              payer: wallet.publicKey,
+              sessionAccount: legacySessionSigner.publicKey,
+              delegate: delegate.publicKey,
+              delegateMinLamports: SESSION_DELEGATE_MIN_FEE_LAMPORTS,
+              delegateTopupLamports: SESSION_DELEGATE_TOPUP_LAMPORTS,
+            });
+            if (prepared.createIx) {
+              tx.add(prepared.createIx);
+              extraSigners = [legacySessionSigner];
+            }
+            if (prepared.topupIx) tx.add(prepared.topupIx);
+          } else if (topupIx) {
+            tx.add(topupIx);
+          }
+          tx.add(sessionIx);
+          return sendAndConfirm(tx, extraSigners);
+        }
     );
+    const sessionAddress =
+      compatResult.schema === "legacy"
+        ? legacySessionSigner.publicKey.toBase58()
+        : await sessionClient.deriveSessionAddress(
+            wallet.publicKey.toBase58(),
+            delegate.publicKey.toBase58(),
+            scriptAccount
+          );
     setSession({
       delegate,
-      sessionAccount,
+      sessionAccount: new PublicKey(sessionAddress),
       status: "active",
       nonce: syncedNonce,
       expiresAtSlot,
@@ -595,15 +982,29 @@ export default function Home() {
     if (!session.sessionAccount || !session.delegate || !wallet.publicKey) {
       throw new Error("No session to revoke.");
     }
-    const sessionClient = new SessionClient({
-      vmProgramId,
-      managerScriptAccount: session.managerScriptAccount || resolveSessionManagerScriptAccount(),
-    });
-    const revokeIx = await sessionClient.revokeSessionIx({
-      authority: wallet.publicKey.toBase58(),
-      delegate: session.delegate.publicKey.toBase58(),
-      targetProgram: scriptAccount,
-      payer: wallet.publicKey.toBase58(),
+    const managerScriptAccount = session.managerScriptAccount || resolveSessionManagerScriptAccount();
+    const authority = wallet.publicKey.toBase58();
+    const program = FiveProgram.fromABI(
+      managerScriptAccount,
+      SESSION_MANAGER_REVOKE_ABI as Parameters<typeof FiveProgram.fromABI>[1],
+      { fiveVMProgramId: vmProgramId }
+    );
+    const encoded = await program
+      .function("revoke_session")
+      .accounts({
+        session: session.sessionAccount.toBase58(),
+        authority,
+      })
+      .payer(authority)
+      .instruction();
+    const revokeIx = new TransactionInstruction({
+      programId: new PublicKey(encoded.programId),
+      keys: encoded.keys.map((k: { pubkey: string; isSigner: boolean; isWritable: boolean }) => ({
+        pubkey: new PublicKey(k.pubkey),
+        isSigner: k.isSigner,
+        isWritable: k.isWritable,
+      })),
+      data: Buffer.from(decodeBase64ToBytes(encoded.data)),
     });
     await sendAndConfirm(new Transaction().add(revokeIx));
     setSession((prev) => ({
@@ -617,11 +1018,92 @@ export default function Home() {
 
   async function setupAndDeal(seed: number, wager: number) {
     const resolved = await ensureInitialized();
+    const playerInfo = await connection.getAccountInfo(new PublicKey(resolved.player), "confirmed");
+    if (!playerInfo?.data) throw new Error("player account not found");
+    const player = readPlayerSnapshot(playerInfo.data);
+    setState((prev) => ({ ...prev, chips: player.chips }));
+    if (player.inRound) {
+      throw new Error("round already in progress on-chain; finish with hit/stand before dealing again");
+    }
+    if (player.chips < wager) {
+      throw new Error(`insufficient chips for bet ${wager}; on-chain chips=${player.chips}`);
+    }
     const startRoundIx = await buildInstruction("start_round", { bet: wager, seed }, resolved);
     try {
       await sendAndConfirm(new Transaction().add(startRoundIx));
+      await syncStateFromChain(resolved);
     } catch (err) {
       throw new Error(`setup(start_round) failed: ${errText(err)}`);
+    }
+  }
+
+  async function syncStateFromChain(resolved: GameAccounts) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const [playerInfo, roundInfo] = await Promise.all([
+        connection.getAccountInfo(new PublicKey(resolved.player), "confirmed"),
+        connection.getAccountInfo(new PublicKey(resolved.round), "confirmed"),
+      ]);
+      if (!playerInfo?.data) {
+        if (attempt < 2) await sleep(120);
+        continue;
+      }
+
+      const player = readPlayerSnapshot(playerInfo.data);
+      if (!roundInfo?.data) {
+        setState((prev) => ({
+          ...prev,
+          chips: player.chips,
+          activeBet: player.activeBet,
+          playerTotal: player.handTotal,
+          dealerTotal: player.dealerTotal,
+          outcome: player.outcome,
+          inRound: player.inRound,
+          dealerReveal: !player.inRound,
+        }));
+        if (attempt < 2) await sleep(120);
+        continue;
+      }
+
+      const round = readRoundSnapshot(roundInfo.data);
+      const playerCards: number[] = [];
+      const dealerCards: number[] = [];
+      let cursor = 0;
+      const pushPlayer = () => {
+        if (playerCards.length >= round.playerCardCount) return;
+        playerCards.push(cardRank(round.deckSeed, cursor, round.ownerMarker));
+        cursor += 1;
+      };
+      const pushDealer = () => {
+        if (dealerCards.length >= round.dealerCardCount) return;
+        dealerCards.push(cardRank(round.deckSeed, cursor, round.ownerMarker));
+        cursor += 1;
+      };
+
+      pushPlayer();
+      pushDealer();
+      pushPlayer();
+      pushDealer();
+      while (playerCards.length < round.playerCardCount) pushPlayer();
+      while (dealerCards.length < round.dealerCardCount) pushDealer();
+
+      setState((prev) => ({
+        ...prev,
+        chips: player.chips,
+        activeBet: player.activeBet,
+        playerTotal: player.handTotal,
+        dealerTotal: player.dealerTotal,
+        outcome: player.outcome,
+        inRound: player.inRound,
+        deckSeed: round.deckSeed,
+        ownerMarker: round.ownerMarker,
+        drawCursor: round.drawCursor,
+        playerSoftAces: round.playerSoftAces,
+        dealerSoftAces: round.dealerSoftAces,
+        playerCards,
+        dealerCards,
+        dealerReveal: !player.inRound,
+      }));
+      return;
     }
   }
 
@@ -642,114 +1124,6 @@ export default function Home() {
     }));
   }
 
-  function applyStartRound(seed: number, wager: number) {
-    setState((prev) => {
-      const ownerMarker = 1 + wager + (seed % 97);
-      let drawCursor = 0;
-      let pTotal = 0;
-      let dTotal = 0;
-      let pSoft = 0;
-      let dSoft = 0;
-      const pCards: number[] = [];
-      const dCards: number[] = [];
-
-      let c = addCard(pTotal, pSoft, seed, drawCursor, ownerMarker);
-      pTotal = c.total; pSoft = c.softAces; drawCursor = c.cursor; pCards.push(c.rank);
-      c = addCard(dTotal, dSoft, seed, drawCursor, ownerMarker);
-      dTotal = c.total; dSoft = c.softAces; drawCursor = c.cursor; dCards.push(c.rank);
-      c = addCard(pTotal, pSoft, seed, drawCursor, ownerMarker);
-      pTotal = c.total; pSoft = c.softAces; drawCursor = c.cursor; pCards.push(c.rank);
-      c = addCard(dTotal, dSoft, seed, drawCursor, ownerMarker);
-      dTotal = c.total; dSoft = c.softAces; drawCursor = c.cursor; dCards.push(c.rank);
-
-      return {
-        ...prev,
-        activeBet: wager,
-        deckSeed: seed,
-        ownerMarker,
-        drawCursor,
-        playerTotal: pTotal,
-        dealerTotal: dTotal,
-        playerSoftAces: pSoft,
-        dealerSoftAces: dSoft,
-        playerCards: pCards,
-        dealerCards: dCards,
-        inRound: true,
-        outcome: ROUND_ACTIVE,
-        dealerReveal: false,
-      };
-    });
-  }
-
-  function applyHit() {
-    setState((prev) => {
-      if (!prev.inRound) return prev;
-      const c = addCard(prev.playerTotal, prev.playerSoftAces, prev.deckSeed, prev.drawCursor, prev.ownerMarker);
-      const next = {
-        ...prev,
-        playerTotal: c.total,
-        playerSoftAces: c.softAces,
-        drawCursor: c.cursor,
-        playerCards: [...prev.playerCards, c.rank],
-      };
-      if (next.playerTotal > 21) {
-        return {
-          ...next,
-          inRound: false,
-          outcome: ROUND_DEALER_WIN,
-          chips: next.chips - next.activeBet,
-          dealerReveal: true,
-        };
-      }
-      return next;
-    });
-  }
-
-  function applyStand() {
-    setState((prev) => {
-      if (!prev.inRound) return prev;
-      let dealerTotal = prev.dealerTotal;
-      let dealerSoft = prev.dealerSoftAces;
-      let cursor = prev.drawCursor;
-      const dealerCards = [...prev.dealerCards];
-
-      while (dealerShouldDraw(dealerTotal, dealerSoft, prev.dealerSoft17Hits)) {
-        const c = addCard(dealerTotal, dealerSoft, prev.deckSeed, cursor, prev.ownerMarker);
-        dealerTotal = c.total;
-        dealerSoft = c.softAces;
-        cursor = c.cursor;
-        dealerCards.push(c.rank);
-        if (dealerCards.length > 12) break;
-      }
-
-      let outcome = ROUND_PUSH;
-      let chips = prev.chips;
-      if (dealerTotal > 21) {
-        outcome = ROUND_PLAYER_WIN;
-        chips += prev.activeBet;
-      } else if (prev.playerTotal > dealerTotal) {
-        outcome = ROUND_PLAYER_WIN;
-        chips += prev.activeBet;
-      } else if (prev.playerTotal < dealerTotal) {
-        outcome = ROUND_DEALER_WIN;
-        chips -= prev.activeBet;
-      }
-
-      return {
-        ...prev,
-        dealerTotal,
-        dealerSoftAces: dealerSoft,
-        drawCursor: cursor,
-        dealerCards,
-        outcome,
-        chips,
-        inRound: false,
-        activeBet: 0,
-        dealerReveal: true,
-      };
-    });
-  }
-
   async function runAction(name: string, fn: () => Promise<void>) {
     try {
       setBusy(true);
@@ -758,7 +1132,10 @@ export default function Home() {
       setStatus(`${name} complete`);
     } catch (err) {
       const message = errText(err);
-      if (/access forbidden|\"code\"\s*:\s*403/i.test(message)) {
+      setLastTxError(`[${name}] ${debugErrText(err)}`);
+      if (isUserRejectedWalletAction(message)) {
+        setStatus(`${name} cancelled in wallet`);
+      } else if (/access forbidden|\"code\"\s*:\s*403/i.test(message)) {
         setStatus(`${name} failed: RPC endpoint blocked this request (403). Switch to a permitted endpoint.`);
       } else {
         setStatus(`${name} failed: ${message}`);
@@ -780,7 +1157,7 @@ export default function Home() {
 
   return (
     <div className="h-[100dvh] relative overflow-hidden flex flex-col bg-emerald-950">
-      <Navbar status={status} chips={state.chips} activeBet={state.activeBet} walletConnected={walletConnected} />
+      <Navbar status={status} chips={state.chips} activeBet={state.activeBet} />
 
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_rgba(16,185,129,0.15)_0%,_rgba(2,44,34,1)_100%)] pointer-events-none z-0" />
       <div className="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/black-paper.png')] pointer-events-none mix-blend-overlay z-0" />
@@ -893,7 +1270,6 @@ export default function Home() {
                     const wager = Math.max(state.minBet, Math.min(state.maxBet, bet || 25));
                     const seed = Date.now() % 1_000_000;
                     await setupAndDeal(seed, wager);
-                    applyStartRound(seed, wager);
                   })
                 }
               >
@@ -903,7 +1279,7 @@ export default function Home() {
               <button
                 className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold uppercase tracking-widest text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
                 disabled={!canHit || sessionModeBlocked}
-                onClick={() => runAction("hit", async () => { await callAction("hit", {}); applyHit(); })}
+                onClick={() => runAction("hit", async () => { await callAction("hit", {}); })}
               >
                 Hit
               </button>
@@ -911,7 +1287,7 @@ export default function Home() {
               <button
                 className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-bold uppercase tracking-widest text-rose-300 hover:bg-rose-500/20 hover:border-rose-500/50 disabled:opacity-30 disabled:cursor-not-allowed transition-all active:scale-95"
                 disabled={!canStand || sessionModeBlocked}
-                onClick={() => runAction("stand", async () => { await callAction("stand_and_settle", {}); applyStand(); })}
+                onClick={() => runAction("stand", async () => { await callAction("stand_and_settle", {}); })}
               >
                 Stand
               </button>
@@ -919,7 +1295,19 @@ export default function Home() {
 
             <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-2 text-xs font-mono text-emerald-100/80">
               <div className="mb-2 flex items-center justify-between">
-                <div className="uppercase tracking-widest text-emerald-300/70">Session</div>
+                <div className="relative group/session-help flex items-center gap-1.5">
+                  <div className="uppercase tracking-widest text-emerald-300/70">Session</div>
+                  <button
+                    type="button"
+                    className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-emerald-300/35 text-[9px] font-bold text-emerald-200/90 hover:bg-emerald-400/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/60"
+                    aria-label="What session mode does"
+                  >
+                    ?
+                  </button>
+                  <div className="pointer-events-none absolute left-0 top-6 z-20 hidden w-64 rounded-lg border border-emerald-300/30 bg-emerald-950/95 p-2 text-[10px] font-medium normal-case leading-relaxed tracking-normal text-emerald-100 shadow-xl group-hover/session-help:block group-focus-within/session-help:block">
+                    Session mode lets you approve once, then a delegated signer can submit hit/stand transactions until the session expires.
+                  </div>
+                </div>
                 <span className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider ${
                   session.status === "active"
                     ? "bg-emerald-400/20 text-emerald-200"
@@ -984,26 +1372,59 @@ export default function Home() {
 
               <div className="hidden md:block mt-1 rounded-xl border border-white/10 bg-black/25 p-2 text-[10px] font-mono text-emerald-500/70 space-y-1">
               <div>vm: {vmProgramId}</div>
-              <div>script: {scriptAccount || "MISSING NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT"}</div>
+              <div>script: {scriptAccount || "MISSING NEXT_PUBLIC_FIVE_SCRIPT_ACCOUNT_DEVNET/MAINNET"}</div>
+              <div>network: {network}</div>
+              <div>rpc: {endpoint}</div>
               <div>round_status: {outcomeLabel(state.outcome)}</div>
+              <div className="break-words whitespace-pre-wrap text-rose-300/90">
+                last_error: {lastTxError || "none"}
+              </div>
               <div>
                 accounts:{" "}
-                {accounts
-                  ? `t=${shortKey(accounts.table)} p=${shortKey(accounts.player)} r=${shortKey(accounts.round)}`
-                  : "unset"}
+                {accounts ? (
+                  <>
+                    <a
+                      href={`https://solscan.io/account/${accounts.table}${solscanClusterSuffix}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-emerald-300 hover:underline"
+                    >
+                      t={shortKey(accounts.table)}
+                    </a>{" "}
+                    <a
+                      href={`https://solscan.io/account/${accounts.player}${solscanClusterSuffix}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-emerald-300 hover:underline"
+                    >
+                      p={shortKey(accounts.player)}
+                    </a>{" "}
+                    <a
+                      href={`https://solscan.io/account/${accounts.round}${solscanClusterSuffix}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-emerald-300 hover:underline"
+                    >
+                      r={shortKey(accounts.round)}
+                    </a>
+                  </>
+                ) : (
+                  "unset"
+                )}
               </div>
               <div>
                 txs:{" "}
                 {sigs.length ? (
                   sigs.map((sig, idx) => (
                     <span key={sig}>
-                      {explorerPrefix ? (
-                        <a href={`${explorerPrefix}${sig}${explorerSuffix}`} target="_blank" rel="noreferrer" className="text-emerald-300 hover:underline">
-                          {shortSig(sig)}
-                        </a>
-                      ) : (
-                        shortSig(sig)
-                      )}
+                      <a
+                        href={`https://solscan.io/tx/${sig}${solscanClusterSuffix}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-emerald-300 hover:underline"
+                      >
+                        {shortSig(sig)}
+                      </a>
                       {idx < sigs.length - 1 ? " | " : ""}
                     </span>
                   ))

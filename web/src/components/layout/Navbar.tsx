@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { useWallet } from "@solana/wallet-adapter-react";
 import { Github, Hexagon } from "lucide-react";
+import { useNetworkConfig } from "@/components/providers/WalletContextProvider";
 
 const WalletMultiButton = dynamic(
   () => import("@solana/wallet-adapter-react-ui").then((m) => m.WalletMultiButton),
@@ -14,12 +14,10 @@ type NavbarProps = {
   status?: string;
   chips?: number;
   activeBet?: number;
-  walletConnected?: boolean;
 };
 
-export function Navbar({ status, chips, activeBet, walletConnected }: NavbarProps) {
-  const { connected } = useWallet();
-  const isConnected = walletConnected ?? connected;
+export function Navbar({ status, chips, activeBet }: NavbarProps) {
+  const { network, setNetwork } = useNetworkConfig();
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 px-2 py-2 sm:px-4 md:px-6">
@@ -39,10 +37,29 @@ export function Navbar({ status, chips, activeBet, walletConnected }: NavbarProp
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            <div className="hidden md:flex text-xs font-semibold uppercase tracking-wider">
-              <span className={isConnected ? "text-emerald-300" : "text-rose-300"}>
-                {isConnected ? "Wallet connected" : "Wallet disconnected"}
-              </span>
+            <div className="hidden sm:flex items-center rounded-xl border border-white/10 bg-white/5 p-1">
+              <button
+                type="button"
+                onClick={() => setNetwork("devnet")}
+                className={`rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-widest transition-colors ${
+                  network === "devnet"
+                    ? "bg-emerald-500/35 text-emerald-50"
+                    : "text-emerald-200/75 hover:bg-white/10"
+                }`}
+              >
+                Devnet
+              </button>
+              <button
+                type="button"
+                onClick={() => setNetwork("mainnet")}
+                className={`rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-widest transition-colors ${
+                  network === "mainnet"
+                    ? "bg-emerald-500/35 text-emerald-50"
+                    : "text-emerald-200/75 hover:bg-white/10"
+                }`}
+              >
+                Mainnet
+              </button>
             </div>
             <div className="[&_.wallet-adapter-button]:h-9 sm:[&_.wallet-adapter-button]:h-10 [&_.wallet-adapter-button]:rounded-xl [&_.wallet-adapter-button]:border [&_.wallet-adapter-button]:border-emerald-300/30 [&_.wallet-adapter-button]:bg-emerald-500/20 [&_.wallet-adapter-button]:px-3 sm:[&_.wallet-adapter-button]:px-5 [&_.wallet-adapter-button]:text-emerald-50 [&_.wallet-adapter-button]:font-bold [&_.wallet-adapter-button]:text-xs sm:[&_.wallet-adapter-button]:text-sm [&_.wallet-adapter-button]:hover:bg-emerald-500/35 transition-all active:scale-95 rounded-xl">
               <WalletMultiButton />

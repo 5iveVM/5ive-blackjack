@@ -345,7 +345,6 @@ async function run(): Promise<void> {
       scopeHash: SESSION_SCOPE_HASH,
       bindAccount: ensureAccountMap('hit', payer).player,
       nonce: 0,
-      compatMode: 'auto',
     },
     async (ix, schema) => sendRawIx(connection, payer, ix, [], `create_session_${schema}`).then((r) => {
       if (!r.ok) throw new Error(r.err || 'create_session failed');
