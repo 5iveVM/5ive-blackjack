@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import dynamic from "next/dynamic";
-import { Github, Hexagon } from "lucide-react";
+import { Github } from "lucide-react";
 import { useNetworkConfig } from "@/components/providers/WalletContextProvider";
 
 const WalletMultiButton = dynamic(
@@ -23,12 +22,14 @@ export function Navbar({ status, chips, activeBet }: NavbarProps) {
     <nav className="fixed top-0 left-0 right-0 z-50 px-2 py-2 sm:px-4 md:px-6">
       <div className="mx-auto max-w-7xl">
         <div className="glass flex items-center justify-between gap-2 sm:gap-3 rounded-2xl border border-emerald-300/15 bg-emerald-950/65 px-3 py-2 sm:px-4 sm:py-3 md:px-6">
-          <Link href="/" className="flex items-center gap-2 transition-opacity hover:opacity-80">
-            <Hexagon className="h-6 w-6 text-emerald-300" />
-            <span className="text-lg font-black tracking-wide uppercase text-emerald-50 md:text-xl">
-              5ive<span className="text-emerald-300">Blackjack</span>
-            </span>
-          </Link>
+          <a
+            href="https://5ive.tech"
+            target="_blank"
+            rel="noreferrer"
+            className="text-lg font-black tracking-wide uppercase text-emerald-50 transition-opacity hover:opacity-80 md:text-xl"
+          >
+            5IVE
+          </a>
 
           <div className="hidden lg:flex items-center gap-6 text-[11px] font-mono uppercase tracking-widest text-emerald-100/80">
             <span>status: {status || "ready"}</span>
