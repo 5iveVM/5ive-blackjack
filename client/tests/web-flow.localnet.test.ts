@@ -163,13 +163,14 @@ test("web flow on localnet using five-sdk", async () => {
     session: session.publicKey.toBase58(),
     __session: session.publicKey.toBase58(),
   };
+  const vmSentinelSession = vmProgramId;
 
   // Web-equivalent action flow.
   const initTableIx = decodeIx(
     await program
       .function("init_table")
       .payer(owner)
-      .accounts({ table: baseAccounts.table, authority: baseAccounts.authority })
+      .accounts({ __session: vmSentinelSession, table: baseAccounts.table, authority: baseAccounts.authority })
       .args({ min_bet: 10, max_bet: 100, dealer_soft17_hits: true })
       .instruction()
   );
@@ -177,7 +178,7 @@ test("web flow on localnet using five-sdk", async () => {
     await program
       .function("init_player")
       .payer(owner)
-      .accounts({ player: baseAccounts.player, owner: baseAccounts.owner })
+      .accounts({ __session: vmSentinelSession, player: baseAccounts.player, owner: baseAccounts.owner })
       .args({ initial_chips: 500 })
       .instruction()
   );
@@ -185,7 +186,7 @@ test("web flow on localnet using five-sdk", async () => {
     await program
       .function("start_round")
       .payer(owner)
-      .accounts({ table: baseAccounts.table, player: baseAccounts.player, round: baseAccounts.round, owner })
+      .accounts({ __session: vmSentinelSession, table: baseAccounts.table, player: baseAccounts.player, round: baseAccounts.round, owner })
       .args({ bet: 25, seed: Date.now() % 1_000_000 })
       .instruction()
   );
@@ -248,7 +249,7 @@ test("web flow on localnet using five-sdk", async () => {
     await program
       .function("hit")
       .payer(owner)
-      .accounts({ player: baseAccounts.player, round: baseAccounts.round, owner: baseAccounts.delegate, __session: baseAccounts.__session })
+      .accounts({ __session: baseAccounts.__session, player: baseAccounts.player, round: baseAccounts.round, owner: baseAccounts.delegate })
       .instruction()
   );
   await sendTx(connection, payer, new Transaction().add(hitIx), [delegate]);
@@ -258,11 +259,11 @@ test("web flow on localnet using five-sdk", async () => {
       .function("stand_and_settle")
       .payer(owner)
       .accounts({
+        __session: baseAccounts.__session,
         table: baseAccounts.table,
         player: baseAccounts.player,
         round: baseAccounts.round,
         owner: baseAccounts.delegate,
-        __session: baseAccounts.__session,
       })
       .instruction()
   );

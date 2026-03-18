@@ -348,40 +348,41 @@ export class LocalnetBlackjackEngine {
             session: this.sessionAccount.publicKey.toBase58(),
             __session: this.sessionAccount.publicKey.toBase58(),
         };
+        const vmSentinelSession = this.fiveVmProgramId;
         if (functionName === 'init_table')
-            return { table: base.table, authority: base.authority };
+            return { __session: vmSentinelSession, table: base.table, authority: base.authority };
         if (functionName === 'init_player')
-            return { player: base.player, owner: base.owner };
+            return { __session: vmSentinelSession, player: base.player, owner: base.owner };
         if (functionName === 'start_round') {
-            return { table: base.table, player: base.player, round: base.round, owner: base.owner };
+            return { __session: vmSentinelSession, table: base.table, player: base.player, round: base.round, owner: base.owner };
         }
         if (functionName === 'hit') {
             const ownerForHit = this.useDelegatedSession ? base.delegate : base.owner;
             const sessionForHit = this.useDelegatedSession ? base.__session : this.fiveVmProgramId;
             return {
+                __session: sessionForHit,
                 player: base.player,
                 round: base.round,
                 owner: ownerForHit,
-                __session: sessionForHit,
             };
         }
         if (functionName === 'stand_and_settle') {
             const ownerForStand = this.useDelegatedSession ? base.delegate : base.owner;
             const sessionForStand = this.useDelegatedSession ? base.__session : this.fiveVmProgramId;
             return {
+                __session: sessionForStand,
                 table: base.table,
                 player: base.player,
                 round: base.round,
                 owner: ownerForStand,
-                __session: sessionForStand,
             };
         }
         if (functionName === 'get_player_chips')
-            return { player: base.player };
+            return { __session: vmSentinelSession, player: base.player };
         if (functionName === 'get_round_status')
-            return { player: base.player };
+            return { __session: vmSentinelSession, player: base.player };
         if (functionName === 'get_last_outcome')
-            return { player: base.player };
+            return { __session: vmSentinelSession, player: base.player };
         return {};
     }
     builderFor(functionName, args = {}, walletPubkey) {
