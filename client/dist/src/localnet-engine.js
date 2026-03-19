@@ -1,9 +1,8 @@
-import { readFile, readdir } from 'fs/promises';
-import { homedir } from 'os';
+import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, } from '@solana/web3.js';
-import { FiveProgram, FiveSDK, SessionClient, scopeHashForFunctions } from '@5ive-tech/sdk';
+import { FiveProgram, FiveSDK, SessionClient, SessionManager, deployScriptWithFallback, loadDefaultPayerKeypair, resolveFiveArtifactPath, sendEncodedInstruction, sendTransactionInstruction, scopeHashForFunctions, } from '@5ive-tech/sdk';
 const ROUND_IDLE = 0;
 const ROUND_ACTIVE = 1;
 const ROUND_PLAYER_BUST = 2;
@@ -11,13 +10,7 @@ const ROUND_DEALER_BUST = 3;
 const ROUND_PLAYER_WIN = 4;
 const ROUND_DEALER_WIN = 5;
 const ROUND_PUSH = 6;
-const SESSION_ACCOUNT_SPACE = 256;
 const SESSION_SCOPE_HASH = scopeHashForFunctions(['hit', 'stand_and_settle']);
-const CONFIRM = {
-    commitment: 'confirmed',
-    preflightCommitment: 'confirmed',
-    skipPreflight: false,
-};
 async function loadSessionManagerArtifact(projectRoot) {
     const templateProject = join(projectRoot, '..', 'five-templates', 'session-manager');
     const templateArtifact = join(templateProject, 'build', 'five-session-manager-template.five');
@@ -33,133 +26,13 @@ async function ensureSessionManagerDeployment(connection, payer, vmProgramId, se
     if (existing)
         return;
     const loaded = await loadSessionManagerArtifact(projectRoot);
-    const bytecode = loaded.bytecode;
-    const result = await FiveSDK.deployToSolana(bytecode, connection, payer, {
+    const result = await FiveSDK.deployToSolana(loaded.bytecode, connection, payer, {
         fiveVMProgramId: vmProgramId,
         service: 'session_v1',
     });
     if (!result.success) {
         throw new Error(`session manager deploy failed: ${result.error || 'unknown error'}`);
     }
-}
-function parseConsumedUnits(logs) {
-    if (!logs)
-        return null;
-    for (const line of logs) {
-        const m = line.match(/consumed (\d+) of/);
-        if (m)
-            return Number(m[1]);
-    }
-    return null;
-}
-async function resolveArtifactPath(projectRoot) {
-    const buildDir = join(projectRoot, 'build');
-    const mainPath = join(buildDir, 'main.five');
-    try {
-        await readFile(mainPath, 'utf8');
-        return mainPath;
-    }
-    catch {
-        const entries = await readdir(buildDir);
-        const firstFive = entries.find((name) => name.endsWith('.five'));
-        if (!firstFive) {
-            throw new Error(`No .five artifact found in ${buildDir}. Run npm run build from project root.`);
-        }
-        return join(buildDir, firstFive);
-    }
-}
-async function loadPayer() {
-    const path = process.env.SOLANA_KEYPAIR_PATH || join(homedir(), '.config/solana/id.json');
-    const secret = JSON.parse(await readFile(path, 'utf8'));
-    return Keypair.fromSecretKey(new Uint8Array(secret));
-}
-async function sendIx(connection, payer, encoded, extraSigners = [], name) {
-    const tx = new Transaction().add(new TransactionInstruction({
-        programId: new PublicKey(encoded.programId),
-        keys: encoded.keys.map((k) => ({
-            pubkey: new PublicKey(k.pubkey),
-            isSigner: k.isSigner,
-            isWritable: k.isWritable,
-        })),
-        data: Buffer.from(encoded.data, 'base64'),
-    }));
-    try {
-        const signature = await connection.sendTransaction(tx, [payer, ...extraSigners], CONFIRM);
-        const latest = await connection.getLatestBlockhash('confirmed');
-        await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
-        const txMeta = await connection.getTransaction(signature, {
-            commitment: 'confirmed',
-            maxSupportedTransactionVersion: 0,
-        });
-        const metaErr = txMeta?.meta?.err ?? null;
-        const cu = txMeta?.meta?.computeUnitsConsumed ?? parseConsumedUnits(txMeta?.meta?.logMessages);
-        return {
-            name,
-            signature,
-            computeUnits: cu,
-            ok: metaErr == null,
-            err: metaErr == null ? null : JSON.stringify(metaErr),
-        };
-    }
-    catch (err) {
-        return {
-            name,
-            signature: null,
-            computeUnits: null,
-            ok: false,
-            err: err instanceof Error ? err.message : String(err),
-        };
-    }
-}
-async function createOwnedAccount(connection, payer, account, owner, space) {
-    const lamports = await connection.getMinimumBalanceForRentExemption(space);
-    const tx = new Transaction().add(SystemProgram.createAccount({
-        fromPubkey: payer.publicKey,
-        newAccountPubkey: account.publicKey,
-        lamports,
-        space,
-        programId: owner,
-    }));
-    try {
-        const signature = await connection.sendTransaction(tx, [payer, account], CONFIRM);
-        const latest = await connection.getLatestBlockhash('confirmed');
-        await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
-        return {
-            name: `setup:create_account:${account.publicKey.toBase58()}`,
-            signature,
-            computeUnits: null,
-            ok: true,
-            err: null,
-        };
-    }
-    catch (err) {
-        return {
-            name: `setup:create_account:${account.publicKey.toBase58()}`,
-            signature: null,
-            computeUnits: null,
-            ok: false,
-            err: err instanceof Error ? err.message : String(err),
-        };
-    }
-}
-async function deployScript(connection, payer, loaded, fiveVmProgramId) {
-    let result = await FiveSDK.deployToSolana(loaded.bytecode, connection, payer, {
-        fiveVMProgramId: fiveVmProgramId,
-    });
-    if (!result.success) {
-        result = await FiveSDK.deployLargeProgramToSolana(loaded.bytecode, connection, payer, {
-            fiveVMProgramId: fiveVmProgramId,
-        });
-    }
-    const scriptAccount = result.scriptAccount || result.programId;
-    if (!result.success || !scriptAccount) {
-        throw new Error(`deploy failed: ${result.error || 'unknown error'}`);
-    }
-    return {
-        scriptAccount,
-        signature: result.transactionId || null,
-        deploymentCost: result.deploymentCost || null,
-    };
 }
 function cardRank(seed, cursor, marker) {
     const mixed = seed + cursor * 17 + marker * 31 + 7;
@@ -204,11 +77,14 @@ export class LocalnetBlackjackEngine {
     fiveVmProgramId;
     scriptAccount;
     program;
+    sessionProgram;
     tableAccount;
     playerAccount;
     roundAccount;
+    owner;
     delegate;
     sessionAccount;
+    sessionClient;
     sessionManagerScriptAccount;
     setupSteps;
     useDelegatedSession;
@@ -220,11 +96,14 @@ export class LocalnetBlackjackEngine {
         this.fiveVmProgramId = args.fiveVmProgramId;
         this.scriptAccount = args.scriptAccount;
         this.program = args.program;
+        this.sessionProgram = args.sessionProgram;
         this.tableAccount = args.tableAccount;
         this.playerAccount = args.playerAccount;
         this.roundAccount = args.roundAccount;
+        this.owner = args.owner;
         this.delegate = args.delegate;
         this.sessionAccount = args.sessionAccount;
+        this.sessionClient = args.sessionClient;
         this.sessionManagerScriptAccount = args.sessionManagerScriptAccount;
         this.setupSteps = args.setupSteps;
         this.useDelegatedSession = process.env.FIVE_USE_SESSION !== '0';
@@ -259,19 +138,19 @@ export class LocalnetBlackjackEngine {
                 active: false,
                 scopeHash: SESSION_SCOPE_HASH,
                 managerScriptAccount: args.sessionManagerScriptAccount,
-                sessionAccount: args.sessionAccount.publicKey.toBase58(),
+                sessionAccount: args.sessionAccount,
                 delegate: args.delegate.publicKey.toBase58(),
             },
         };
     }
     static async create(projectRoot) {
-        const artifactPath = await resolveArtifactPath(projectRoot);
+        const artifactPath = await resolveFiveArtifactPath(projectRoot);
         const artifactText = await readFile(artifactPath, 'utf8');
         const loaded = await FiveSDK.loadFiveFile(artifactText);
         const rpcUrl = process.env.FIVE_RPC_URL || 'http://127.0.0.1:8899';
-        const fiveVmProgramId = process.env.FIVE_VM_PROGRAM_ID || '5ive5uKDkc3Yhyfu1Sk7i3eVPDQUmG2GmTm2FnUZiTJd';
+        const fiveVmProgramId = process.env.FIVE_VM_PROGRAM_ID || '5ive5hbC3aRsvq37MP5m4sHtTSFxT4Cq1smS4ddyWJ6h';
         const connection = new Connection(rpcUrl, 'confirmed');
-        const payer = await loadPayer();
+        const payer = await loadDefaultPayerKeypair();
         await connection.getLatestBlockhash('confirmed');
         const vmProgramPk = new PublicKey(fiveVmProgramId);
         const vmProgramInfo = await connection.getAccountInfo(vmProgramPk, 'confirmed');
@@ -282,27 +161,73 @@ export class LocalnetBlackjackEngine {
         const existingScript = process.env.FIVE_SCRIPT_ACCOUNT || '';
         const deploy = existingScript
             ? { scriptAccount: existingScript }
-            : await deployScript(connection, payer, loaded, fiveVmProgramId);
+            : await deployScriptWithFallback(connection, payer, loaded, fiveVmProgramId);
         const program = FiveProgram.fromABI(deploy.scriptAccount, loaded.abi, {
             fiveVMProgramId: fiveVmProgramId,
         });
-        const ownerProgram = vmProgramPk;
         const tableAccount = Keypair.generate();
         const playerAccount = Keypair.generate();
         const roundAccount = Keypair.generate();
+        const owner = Keypair.generate();
         const delegate = Keypair.generate();
-        const sessionAccount = Keypair.generate();
-        const sessionManagerScriptAccount = process.env.FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT ||
-            SessionClient.canonicalManagerScriptAccount(fiveVmProgramId);
-        await ensureSessionManagerDeployment(connection, payer, fiveVmProgramId, sessionManagerScriptAccount, projectRoot);
+        const useDelegatedSession = process.env.FIVE_USE_SESSION !== '0';
+        const configuredSessionManagerScript = process.env.FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT || '';
+        let sessionManagerScriptAccount = configuredSessionManagerScript || SessionClient.canonicalManagerScriptAccount(fiveVmProgramId);
+        if (useDelegatedSession) {
+            if (configuredSessionManagerScript) {
+                await ensureSessionManagerDeployment(connection, payer, fiveVmProgramId, sessionManagerScriptAccount, projectRoot);
+            }
+            else {
+                const managerLoaded = await loadSessionManagerArtifact(projectRoot);
+                const managerDeploy = await deployScriptWithFallback(connection, payer, managerLoaded, fiveVmProgramId);
+                sessionManagerScriptAccount = managerDeploy.scriptAccount;
+            }
+        }
+        const sessionClient = new SessionClient({
+            vmProgramId: fiveVmProgramId,
+            managerScriptAccount: sessionManagerScriptAccount,
+        });
+        const sessionAccount = await sessionClient.deriveSessionAddress(payer.publicKey.toBase58(), delegate.publicKey.toBase58(), deploy.scriptAccount);
+        const sessionManager = new SessionManager(FiveProgram.fromABI(sessionManagerScriptAccount, { name: 'SessionManager', functions: [] }, {
+            fiveVMProgramId: fiveVmProgramId,
+        }), Number(process.env.FIVE_SESSION_TTL_SLOTS || '3000'));
+        const sessionProgram = program.withSession({
+            manager: sessionManager,
+            sessionAccountByFunction: {
+                hit: sessionAccount,
+                stand_and_settle: sessionAccount,
+            },
+        });
         const setupSteps = [];
-        setupSteps.push(await createOwnedAccount(connection, payer, tableAccount, ownerProgram, 256));
-        setupSteps.push(await createOwnedAccount(connection, payer, playerAccount, ownerProgram, 256));
-        setupSteps.push(await createOwnedAccount(connection, payer, roundAccount, ownerProgram, 256));
-        setupSteps.push(await createOwnedAccount(connection, payer, sessionAccount, ownerProgram, SESSION_ACCOUNT_SPACE));
+        const fundOwnerTx = new Transaction().add(SystemProgram.transfer({
+            fromPubkey: payer.publicKey,
+            toPubkey: owner.publicKey,
+            lamports: 1_000_000_000,
+        }));
+        try {
+            const signature = await connection.sendTransaction(fundOwnerTx, [payer]);
+            const latest = await connection.getLatestBlockhash('confirmed');
+            await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+            setupSteps.push({
+                name: `setup:fund_owner:${owner.publicKey.toBase58()}`,
+                signature,
+                computeUnits: null,
+                ok: true,
+                err: null,
+            });
+        }
+        catch (err) {
+            setupSteps.push({
+                name: `setup:fund_owner:${owner.publicKey.toBase58()}`,
+                signature: null,
+                computeUnits: null,
+                ok: false,
+                err: err instanceof Error ? err.message : String(err),
+            });
+        }
         const failed = setupSteps.find((s) => !s.ok);
         if (failed) {
-            throw new Error(`failed setup account creation: ${failed.name}: ${failed.err || 'unknown error'}`);
+            throw new Error(`failed setup step: ${failed.name}: ${failed.err || 'unknown error'}`);
         }
         return new LocalnetBlackjackEngine({
             projectRoot,
@@ -311,11 +236,14 @@ export class LocalnetBlackjackEngine {
             fiveVmProgramId,
             scriptAccount: deploy.scriptAccount,
             program,
+            sessionProgram,
             tableAccount,
             playerAccount,
             roundAccount,
+            owner,
             delegate,
             sessionAccount,
+            sessionClient,
             sessionManagerScriptAccount,
             setupSteps,
         });
@@ -326,67 +254,58 @@ export class LocalnetBlackjackEngine {
     getAddresses() {
         return {
             payer: this.payer.publicKey.toBase58(),
+            owner: this.owner.publicKey.toBase58(),
             scriptAccount: this.scriptAccount,
             fiveVmProgramId: this.fiveVmProgramId,
             table: this.tableAccount.publicKey.toBase58(),
             player: this.playerAccount.publicKey.toBase58(),
             round: this.roundAccount.publicKey.toBase58(),
             delegate: this.delegate.publicKey.toBase58(),
-            session: this.sessionAccount.publicKey.toBase58(),
-            __session: this.sessionAccount.publicKey.toBase58(),
+            session: this.sessionAccount,
             sessionManagerScriptAccount: this.sessionManagerScriptAccount,
         };
     }
     accountsFor(functionName) {
         const base = {
-            owner: this.payer.publicKey.toBase58(),
-            authority: this.payer.publicKey.toBase58(),
+            owner: this.owner.publicKey.toBase58(),
             table: this.tableAccount.publicKey.toBase58(),
             player: this.playerAccount.publicKey.toBase58(),
             round: this.roundAccount.publicKey.toBase58(),
-            delegate: this.delegate.publicKey.toBase58(),
-            session: this.sessionAccount.publicKey.toBase58(),
-            __session: this.sessionAccount.publicKey.toBase58(),
         };
-        const vmSentinelSession = this.fiveVmProgramId;
         if (functionName === 'init_table')
-            return { __session: vmSentinelSession, table: base.table, authority: base.authority };
+            return { table: base.table, authority: this.payer.publicKey.toBase58() };
         if (functionName === 'init_player')
-            return { __session: vmSentinelSession, player: base.player, owner: base.owner };
+            return { player: base.player, owner: base.owner };
         if (functionName === 'start_round') {
-            return { __session: vmSentinelSession, table: base.table, player: base.player, round: base.round, owner: base.owner };
+            return { table: base.table, player: base.player, round: base.round, owner: base.owner };
         }
         if (functionName === 'hit') {
-            const ownerForHit = this.useDelegatedSession ? base.delegate : base.owner;
-            const sessionForHit = this.useDelegatedSession ? base.__session : this.fiveVmProgramId;
             return {
-                __session: sessionForHit,
                 player: base.player,
                 round: base.round,
-                owner: ownerForHit,
+                owner: base.owner,
             };
         }
         if (functionName === 'stand_and_settle') {
-            const ownerForStand = this.useDelegatedSession ? base.delegate : base.owner;
-            const sessionForStand = this.useDelegatedSession ? base.__session : this.fiveVmProgramId;
             return {
-                __session: sessionForStand,
                 table: base.table,
                 player: base.player,
                 round: base.round,
-                owner: ownerForStand,
+                owner: base.owner,
             };
         }
         if (functionName === 'get_player_chips')
-            return { __session: vmSentinelSession, player: base.player };
+            return { player: base.player };
         if (functionName === 'get_round_status')
-            return { __session: vmSentinelSession, player: base.player };
+            return { player: base.player };
         if (functionName === 'get_last_outcome')
-            return { __session: vmSentinelSession, player: base.player };
+            return { player: base.player };
         return {};
     }
     builderFor(functionName, args = {}, walletPubkey) {
-        let builder = this.program
+        const sessionized = this.useDelegatedSession && (functionName === 'hit' || functionName === 'stand_and_settle');
+        const activeProgram = sessionized ? this.sessionProgram : this.program;
+        let builder = activeProgram
             .function(functionName)
             .payer(walletPubkey || this.payer.publicKey.toBase58())
             .accounts(this.accountsFor(functionName));
@@ -402,56 +321,54 @@ export class LocalnetBlackjackEngine {
         const ttlSlots = Number(process.env.FIVE_SESSION_TTL_SLOTS || '3000');
         const expiresAtSlot = slot + Math.max(1, ttlSlots);
         const nonce = this.state.player.sessionNonce;
-        const sessionManager = await loadSessionManagerArtifact(this.projectRoot);
-        const managerProgram = FiveProgram.fromABI(this.sessionManagerScriptAccount, sessionManager.abi, {
-            fiveVMProgramId: this.fiveVmProgramId,
-        });
-        const builder = managerProgram
-            .function('create_session')
-            .payer(this.payer.publicKey.toBase58())
-            .accounts({
-            session: this.sessionAccount.publicKey.toBase58(),
+        const createSession = await this.sessionClient
+            .createSessionWithCompat({
             authority: this.payer.publicKey.toBase58(),
             delegate: this.delegate.publicKey.toBase58(),
-        })
-            .args({
-            target_program: this.scriptAccount,
-            expires_at_slot: expiresAtSlot,
-            scope_hash: SESSION_SCOPE_HASH,
-            bind_account: this.playerAccount.publicKey.toBase58(),
+            targetProgram: this.scriptAccount,
+            expiresAtSlot,
+            scopeHash: SESSION_SCOPE_HASH,
+            bindAccount: this.playerAccount.publicKey.toBase58(),
             nonce,
-        });
-        const ix = await builder.instruction();
-        const step = await sendIx(this.connection, this.payer, ix, [], 'create_session');
+        }, async (ix, schema) => {
+            const sent = await sendTransactionInstruction(this.connection, this.payer, ix, [], `create_session_${schema}`);
+            if (!sent.ok)
+                throw new Error(sent.err || 'create_session failed');
+            return sent.signature || '';
+        })
+            .then((result) => ({
+            name: `create_session_${result.schema}`,
+            signature: result.signature,
+            computeUnits: null,
+            ok: true,
+            err: null,
+        }))
+            .catch((err) => ({
+            name: 'create_session',
+            signature: null,
+            computeUnits: null,
+            ok: false,
+            err: err instanceof Error ? err.message : String(err),
+        }));
+        const step = createSession;
         if (step.ok) {
             this.state.session.active = true;
         }
         return step;
     }
-    async resolveSessionArgs() {
-        return {};
-    }
-    async call(functionName, args = {}) {
+    async call(functionName, args = {}, extraSigners = []) {
         const sessionized = this.useDelegatedSession && (functionName === 'hit' || functionName === 'stand_and_settle');
-        let combinedArgs = { ...args };
         if (sessionized) {
             const sessionStep = await this.ensureSession();
             if (sessionStep && !sessionStep.ok)
                 return sessionStep;
-            combinedArgs = { ...combinedArgs, ...(await this.resolveSessionArgs()) };
         }
-        const builder = this.builderFor(functionName, combinedArgs);
+        const builder = this.builderFor(functionName, args);
         const ix = await builder.instruction();
-        const extraSigners = sessionized ? [this.delegate] : [];
-        return sendIx(this.connection, this.payer, ix, extraSigners, functionName);
+        return sendEncodedInstruction(this.connection, this.payer, ix, extraSigners, functionName);
     }
     async buildUnsignedTx(functionName, _role, args, walletPubkey) {
-        const sessionized = this.useDelegatedSession && (functionName === 'hit' || functionName === 'stand_and_settle');
-        let combinedArgs = { ...args };
-        if (sessionized) {
-            combinedArgs = { ...combinedArgs, ...(await this.resolveSessionArgs()) };
-        }
-        const builder = this.builderFor(functionName, combinedArgs, walletPubkey);
+        const builder = this.builderFor(functionName, args, walletPubkey);
         const ix = await builder.instruction();
         const tx = new Transaction().add(new TransactionInstruction({
             programId: new PublicKey(ix.programId),
@@ -465,9 +382,6 @@ export class LocalnetBlackjackEngine {
         tx.feePayer = new PublicKey(walletPubkey);
         const latest = await this.connection.getLatestBlockhash('confirmed');
         tx.recentBlockhash = latest.blockhash;
-        if (sessionized) {
-            tx.partialSign(this.delegate);
-        }
         return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
     }
     applyInitLocal(setup) {
@@ -630,11 +544,11 @@ export class LocalnetBlackjackEngine {
             min_bet: setup.minBet,
             max_bet: setup.maxBet,
             dealer_soft17_hits: setup.dealerSoft17Hits,
-        });
+        }, [this.tableAccount]);
         steps.push(initTable);
         const initPlayer = await this.call('init_player', {
             initial_chips: setup.initialChips,
-        });
+        }, [this.playerAccount, this.owner]);
         steps.push(initPlayer);
         if (initTable.ok && initPlayer.ok) {
             this.applyInitLocal(setup);
@@ -642,21 +556,21 @@ export class LocalnetBlackjackEngine {
         return steps;
     }
     async startRound(bet, seed) {
-        const step = await this.call('start_round', { bet, seed });
+        const step = await this.call('start_round', { bet, seed }, [this.roundAccount, this.owner]);
         if (!step.ok)
             return step;
         this.applyStartRoundLocal(bet, seed);
         return step;
     }
     async hit() {
-        const step = await this.call('hit', {});
+        const step = await this.call('hit', {}, [this.owner]);
         if (!step.ok)
             return step;
         this.applyHitLocal();
         return step;
     }
     async stand() {
-        const step = await this.call('stand_and_settle', {});
+        const step = await this.call('stand_and_settle', {}, [this.owner]);
         if (!step.ok)
             return step;
         this.applyStandLocal();

@@ -85,7 +85,7 @@ fn dealer_should_draw(total: u64, soft_aces: u64, dealer_soft17_hits: bool) -> b
 }
 
 pub init_table(
-    table: BlackjackTable @mut,
+    table: BlackjackTable @mut @init(payer=authority),
     authority: account @signer,
     min_bet: u64,
     max_bet: u64,
@@ -102,7 +102,7 @@ pub init_table(
 }
 
 pub init_player(
-    player: PlayerState @mut,
+    player: PlayerState @mut @init(payer=owner),
     owner: account @signer,
     initial_chips: u64
 ) {
@@ -122,7 +122,7 @@ pub init_player(
 pub start_round(
     table: BlackjackTable @mut,
     player: PlayerState @mut,
-    round: RoundState @mut,
+    round: RoundState @mut @init(payer=owner),
     owner: account @signer,
     bet: u64,
     seed: u64
@@ -210,7 +210,7 @@ pub start_round(
 pub hit(
     player: PlayerState @mut,
     round: RoundState @mut,
-    owner: account @session
+    owner: account @signer
 ) {
     require(player.owner == owner.ctx.key);
     require(player.in_round);
@@ -244,7 +244,7 @@ pub stand_and_settle(
     table: BlackjackTable,
     player: PlayerState @mut,
     round: RoundState @mut,
-    owner: account @session
+    owner: account @signer
 ) {
     require(player.owner == owner.ctx.key);
     require(player.in_round);
