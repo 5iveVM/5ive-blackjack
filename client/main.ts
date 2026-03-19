@@ -46,40 +46,22 @@ const MAX_BET = Number(process.env.FIVE_MAX_BET || '100');
 const DEALER_SOFT17_HITS = process.env.FIVE_DEALER_SOFT17_HITS === '1';
 const DO_HIT = process.env.FIVE_DO_HIT !== '0';
 const SESSION_TTL_SLOTS = Number(process.env.FIVE_SESSION_TTL_SLOTS || '3000');
+const USE_DELEGATED_SESSION = process.env.FIVE_USE_SESSION !== '0';
 
 const SESSION_SCOPE_HASH = scopeHashForFunctions(['hit', 'stand_and_settle']);
+const TABLE_ACCOUNT_SPACE = 4096;
+const PLAYER_ACCOUNT_SPACE = 4096;
+const ROUND_ACCOUNT_SPACE = 4096;
+const SESSION_ACCOUNT_SPACE = 1024;
 
-const ACCOUNT_OVERRIDES: Record<string, Record<string, string>> = {
-  init_table: {
-    table: '<TABLE_ACCOUNT_PUBKEY>',
-  },
-  init_player: {
-    player: '<PLAYER_ACCOUNT_PUBKEY>',
-  },
-  start_round: {
-    table: '<TABLE_ACCOUNT_PUBKEY>',
-    player: '<PLAYER_ACCOUNT_PUBKEY>',
-    round: '<ROUND_ACCOUNT_PUBKEY>',
-  },
-  hit: {
-    player: '<PLAYER_ACCOUNT_PUBKEY>',
-    round: '<ROUND_ACCOUNT_PUBKEY>',
-  },
-  stand_and_settle: {
-    table: '<TABLE_ACCOUNT_PUBKEY>',
-    player: '<PLAYER_ACCOUNT_PUBKEY>',
-    round: '<ROUND_ACCOUNT_PUBKEY>',
-  },
-  get_player_chips: {
-    player: '<PLAYER_ACCOUNT_PUBKEY>',
-  },
-  get_round_status: {
-    player: '<PLAYER_ACCOUNT_PUBKEY>',
-  },
-  get_last_outcome: {
-    player: '<PLAYER_ACCOUNT_PUBKEY>',
-  },
+type RuntimeAccounts = {
+  table: string;
+  player: string;
+  round: string;
 };
+
+let RUNTIME_ACCOUNTS: RuntimeAccounts | null = null;
+let VM_SENTINEL_SESSION = PROGRAM_BY_NETWORK.localnet;
 
 function parseConsumedUnits(logs: string[] | null | undefined): number | null {
   if (!logs) return null;
@@ -116,15 +98,38 @@ async function loadPayer(): Promise<Keypair> {
 }
 
 function ensureAccountMap(functionName: string, payer: Keypair): Record<string, string> {
-  const map = { ...(ACCOUNT_OVERRIDES[functionName] || {}) };
-  const fnMissing = Object.values(map).some((v) => v.includes('<'));
-  if (fnMissing) {
-    throw new Error(
-      `Missing ACCOUNT_OVERRIDES for ${functionName}. Update client/main.ts with real table/player/round pubkeys.`
-    );
+  if (!RUNTIME_ACCOUNTS) {
+    throw new Error('Runtime accounts are not initialized');
   }
-  map.owner = payer.publicKey.toBase58();
-  return map;
+  const owner = payer.publicKey.toBase58();
+  const base = {
+    owner,
+    table: RUNTIME_ACCOUNTS.table,
+    player: RUNTIME_ACCOUNTS.player,
+    round: RUNTIME_ACCOUNTS.round,
+    __session: VM_SENTINEL_SESSION,
+  };
+  if (functionName === 'init_table') return { __session: VM_SENTINEL_SESSION, table: base.table, authority: owner };
+  if (functionName === 'init_player') return { __session: VM_SENTINEL_SESSION, player: base.player, owner };
+  if (functionName === 'start_round') {
+    return { __session: VM_SENTINEL_SESSION, table: base.table, player: base.player, round: base.round, owner };
+  }
+  if (functionName === 'hit') {
+    return { __session: VM_SENTINEL_SESSION, player: base.player, round: base.round, owner };
+  }
+  if (functionName === 'stand_and_settle') {
+    return {
+      __session: VM_SENTINEL_SESSION,
+      table: base.table,
+      player: base.player,
+      round: base.round,
+      owner,
+    };
+  }
+  if (functionName === 'get_player_chips') return { __session: VM_SENTINEL_SESSION, player: base.player };
+  if (functionName === 'get_round_status') return { __session: VM_SENTINEL_SESSION, player: base.player };
+  if (functionName === 'get_last_outcome') return { __session: VM_SENTINEL_SESSION, player: base.player };
+  return {};
 }
 
 async function sendIx(
@@ -223,10 +228,51 @@ async function callFunction(
 ): Promise<StepResult> {
   let builder = program
     .function(functionName)
-    .accounts(options.accountMap || ensureAccountMap(functionName, payer));
+    .accounts(options.accountMap || ensureAccountMap(functionName, payer))
+    .payer(payer.publicKey.toBase58());
   if (Object.keys(args).length > 0) builder = builder.args(args);
   const encoded = await builder.instruction();
   return sendIx(connection, payer, encoded, options.extraSigners || [], functionName);
+}
+
+async function createOwnedAccount(
+  connection: Connection,
+  payer: Keypair,
+  account: Keypair,
+  owner: PublicKey,
+  space: number
+): Promise<StepResult> {
+  const lamports = await connection.getMinimumBalanceForRentExemption(space);
+  const tx = new Transaction().add(
+    SystemProgram.createAccount({
+      fromPubkey: payer.publicKey,
+      newAccountPubkey: account.publicKey,
+      lamports,
+      space,
+      programId: owner,
+    })
+  );
+
+  try {
+    const signature = await connection.sendTransaction(tx, [payer, account], CONFIRM);
+    const latest = await connection.getLatestBlockhash('confirmed');
+    await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+    return {
+      name: `setup:create_account:${account.publicKey.toBase58()}`,
+      signature,
+      computeUnits: null,
+      ok: true,
+      err: null,
+    };
+  } catch (err) {
+    return {
+      name: `setup:create_account:${account.publicKey.toBase58()}`,
+      signature: null,
+      computeUnits: null,
+      ok: false,
+      err: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 function printStep(step: StepResult): void {
@@ -261,6 +307,16 @@ async function run(): Promise<void> {
 
   const connection = new Connection(rpcUrl, 'confirmed');
   const payer = await loadPayer();
+  VM_SENTINEL_SESSION = fiveProgramId;
+  const ownerProgram = new PublicKey(fiveProgramId);
+  const tableAccount = Keypair.generate();
+  const playerAccount = Keypair.generate();
+  const roundAccount = Keypair.generate();
+  RUNTIME_ACCOUNTS = {
+    table: tableAccount.publicKey.toBase58(),
+    player: playerAccount.publicKey.toBase58(),
+    round: roundAccount.publicKey.toBase58(),
+  };
 
   const artifactPath = await resolveArtifactPath();
   const artifactText = await readFile(artifactPath, 'utf8');
@@ -290,80 +346,84 @@ async function run(): Promise<void> {
   const steps: StepResult[] = [];
 
   steps.push(
-    await callFunction(connection, payer, program, 'init_table', {
-      min_bet: MIN_BET,
-      max_bet: MAX_BET,
-      dealer_soft17_hits: DEALER_SOFT17_HITS,
-    })
+    await callFunction(
+      connection,
+      payer,
+      program,
+      'init_table',
+      {
+        min_bet: MIN_BET,
+        max_bet: MAX_BET,
+        dealer_soft17_hits: DEALER_SOFT17_HITS,
+      },
+      {
+        extraSigners: [tableAccount],
+      }
+    )
   );
 
   steps.push(
-    await callFunction(connection, payer, program, 'init_player', {
-      initial_chips: INITIAL_CHIPS,
-    })
+    await callFunction(
+      connection,
+      payer,
+      program,
+      'init_player',
+      {
+        initial_chips: INITIAL_CHIPS,
+      },
+      {
+        extraSigners: [playerAccount],
+      }
+    )
   );
 
   steps.push(
-    await callFunction(connection, payer, program, 'start_round', {
-      bet: BET,
-      seed: SEED,
-    })
+    await callFunction(
+      connection,
+      payer,
+      program,
+      'start_round',
+      {
+        bet: BET,
+        seed: SEED,
+      },
+      {
+        extraSigners: [roundAccount],
+      }
+    )
   );
 
-  const sessionLamports = await connection.getMinimumBalanceForRentExemption(256);
-  const createSessionAccountTx = new Transaction().add(
-    SystemProgram.createAccount({
-      fromPubkey: payer.publicKey,
-      newAccountPubkey: session.publicKey,
-      lamports: sessionLamports,
-      space: 256,
-      programId: new PublicKey(fiveProgramId),
-    })
-  );
-  try {
-    const signature = await connection.sendTransaction(createSessionAccountTx, [payer, session], CONFIRM);
-    const latest = await connection.getLatestBlockhash('confirmed');
-    await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
-    steps.push({ name: 'create_session_account', signature, computeUnits: null, ok: true, err: null });
-  } catch (err) {
-    steps.push({
-      name: 'create_session_account',
+  if (USE_DELEGATED_SESSION) {
+    const slot = await connection.getSlot('confirmed');
+    const createSession = await sessionClient.createSessionWithCompat(
+      {
+        authority: payer.publicKey.toBase58(),
+        delegate: delegate.publicKey.toBase58(),
+        targetProgram: scriptAccount,
+        expiresAtSlot: slot + Math.max(1, SESSION_TTL_SLOTS),
+        scopeHash: SESSION_SCOPE_HASH,
+        bindAccount: ensureAccountMap('hit', payer).player,
+        nonce: 0,
+      },
+      async (ix, schema) => sendRawIx(connection, payer, ix, [], `create_session_${schema}`).then((r) => {
+        if (!r.ok) throw new Error(r.err || 'create_session failed');
+        return r.signature || '';
+      })
+    ).then((result) => ({
+      name: `create_session_${result.schema}`,
+      signature: result.signature,
+      computeUnits: null,
+      ok: true,
+      err: null,
+    })).catch((err) => ({
+      name: 'create_session',
       signature: null,
       computeUnits: null,
       ok: false,
       err: err instanceof Error ? err.message : String(err),
-    });
+    }));
+    steps.push(createSession);
   }
-
-  const slot = await connection.getSlot('confirmed');
-  const createSession = await sessionClient.createSessionWithCompat(
-    {
-      authority: payer.publicKey.toBase58(),
-      delegate: delegate.publicKey.toBase58(),
-      targetProgram: scriptAccount,
-      expiresAtSlot: slot + Math.max(1, SESSION_TTL_SLOTS),
-      scopeHash: SESSION_SCOPE_HASH,
-      bindAccount: ensureAccountMap('hit', payer).player,
-      nonce: 0,
-    },
-    async (ix, schema) => sendRawIx(connection, payer, ix, [], `create_session_${schema}`).then((r) => {
-      if (!r.ok) throw new Error(r.err || 'create_session failed');
-      return r.signature || '';
-    })
-  ).then((result) => ({
-    name: `create_session_${result.schema}`,
-    signature: result.signature,
-    computeUnits: null,
-    ok: true,
-    err: null,
-  })).catch((err) => ({
-    name: 'create_session',
-    signature: null,
-    computeUnits: null,
-    ok: false,
-    err: err instanceof Error ? err.message : String(err),
-  }));
-  steps.push(createSession);
 
   if (DO_HIT) {
     steps.push(
@@ -377,10 +437,10 @@ async function run(): Promise<void> {
           accountMap: {
             player: ensureAccountMap('hit', payer).player,
             round: ensureAccountMap('hit', payer).round,
-            owner: delegate.publicKey.toBase58(),
-            __session: session.publicKey.toBase58(),
+            owner: USE_DELEGATED_SESSION ? delegate.publicKey.toBase58() : payer.publicKey.toBase58(),
+            __session: USE_DELEGATED_SESSION ? session.publicKey.toBase58() : fiveProgramId,
           },
-          extraSigners: [delegate],
+          extraSigners: USE_DELEGATED_SESSION ? [delegate] : [],
         }
       )
     );
@@ -398,10 +458,10 @@ async function run(): Promise<void> {
           table: ensureAccountMap('stand_and_settle', payer).table,
           player: ensureAccountMap('stand_and_settle', payer).player,
           round: ensureAccountMap('stand_and_settle', payer).round,
-          owner: delegate.publicKey.toBase58(),
-          __session: session.publicKey.toBase58(),
+          owner: USE_DELEGATED_SESSION ? delegate.publicKey.toBase58() : payer.publicKey.toBase58(),
+          __session: USE_DELEGATED_SESSION ? session.publicKey.toBase58() : fiveProgramId,
         },
-        extraSigners: [delegate],
+        extraSigners: USE_DELEGATED_SESSION ? [delegate] : [],
       }
     )
   );

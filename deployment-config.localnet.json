@@ -2,7 +2,7 @@
   "network": "localnet",
   "rpcUrl": "http://127.0.0.1:8899",
   "fiveProgramId": "5ive5hbC3aRsvq37MP5m4sHtTSFxT4Cq1smS4ddyWJ6h",
-  "vmStatePda": "<SET_AFTER_VM_INIT>",
-  "blackjackScriptAccount": "<SET_AFTER_BLACKJACK_DEPLOY>",
-  "updatedAt": "2026-03-11T00:00:00Z"
+  "vmStatePda": "D2TzCqmXBrVJGkWRTGrzCDp1KaMBPwEXgCRfQRquLJgi",
+  "blackjackScriptAccount": "AP1LjuuUc2roKqLhVGYX8HsqanT3xthupuynakhJ3wGs",
+  "updatedAt": "2026-03-19T03:42:00Z"
 }
