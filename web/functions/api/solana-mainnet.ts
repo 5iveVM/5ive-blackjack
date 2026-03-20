@@ -2,11 +2,30 @@ interface Env {
   SOLANA_MAINNET_RPC_URL?: string;
 }
 
-const PUBLIC_MAINNET_RPC = "https://api.mainnet-beta.solana.com";
-
 export const onRequestPost: PagesFunction<Env> = async (context) => {
+  const rpcTarget = context.env.SOLANA_MAINNET_RPC_URL?.trim();
+  if (!rpcTarget) {
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: {
+          code: -32000,
+          message: "SOLANA_MAINNET_RPC_URL is not configured for this Cloudflare environment.",
+        },
+        id: null,
+      }),
+      {
+        status: 503,
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        },
+      }
+    );
+  }
+
   const payload = await context.request.text();
-  const upstream = await fetch(context.env.SOLANA_MAINNET_RPC_URL || PUBLIC_MAINNET_RPC, {
+  const upstream = await fetch(rpcTarget, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: payload,

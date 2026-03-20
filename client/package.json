@@ -13,7 +13,7 @@
     "journey:localnet": "npm run build && node dist/journey.localnet.js"
   },
   "dependencies": {
-    "@5ive-tech/sdk": "file:../../five-sdk",
+    "@5ive-tech/sdk": "^1.1.23",
     "@solana/web3.js": "^1.98.4"
   },
   "devDependencies": {

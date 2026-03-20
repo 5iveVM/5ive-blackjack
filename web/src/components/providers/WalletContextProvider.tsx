@@ -9,7 +9,7 @@ import { PhantomWalletAdapter } from "@solana/wallet-adapter-wallets";
 // Default styles from adapter
 import "@solana/wallet-adapter-react-ui/styles.css";
 
-export type NetworkName = "devnet" | "mainnet";
+export type NetworkName = "localnet" | "devnet" | "mainnet";
 
 type NetworkContextValue = {
   network: NetworkName;
@@ -20,16 +20,22 @@ type NetworkContextValue = {
 
 const DEVNET_ENDPOINT =
   "https://api.devnet.solana.com";
+const LOCALNET_ENDPOINT =
+  process.env.NEXT_PUBLIC_LOCALNET_RPC_URL ||
+  (process.env.NEXT_PUBLIC_RPC_URL?.includes("127.0.0.1") ? process.env.NEXT_PUBLIC_RPC_URL : "") ||
+  "http://127.0.0.1:8899";
+const LOCALNET_WS_ENDPOINT = "ws://127.0.0.1:8900";
 const DEVNET_WS_ENDPOINT = "wss://api.devnet.solana.com/";
 const DEVNET_PROXY_PATH = "/api/solana-devnet";
 const MAINNET_DISPLAY_ENDPOINT = "https://api.mainnet-beta.solana.com";
 const MAINNET_WS_ENDPOINT = "wss://api.mainnet-beta.solana.com/";
 const MAINNET_PROXY_PATH = "/api/solana-mainnet";
 const DEFAULT_NETWORK: NetworkName =
-  process.env.NEXT_PUBLIC_DEFAULT_NETWORK === "mainnet" ||
-  process.env.NEXT_PUBLIC_RPC_URL?.includes("mainnet")
-    ? "mainnet"
-    : "devnet";
+  process.env.NEXT_PUBLIC_DEFAULT_NETWORK === "localnet"
+    ? "localnet"
+    : process.env.NEXT_PUBLIC_DEFAULT_NETWORK === "mainnet"
+      ? "mainnet"
+      : "devnet";
 const NETWORK_STORAGE_KEY = "five-blackjack-network";
 
 const NetworkContext = createContext<NetworkContextValue | null>(null);
@@ -57,22 +63,37 @@ export function useNetworkConfig(): NetworkContextValue {
 export function WalletContextProvider({ children }: { children: React.ReactNode }) {
   const [network, setNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const endpoint = useMemo(
-    () => (network === "mainnet" ? resolveMainnetRpcEndpoint() : resolveDevnetRpcEndpoint()),
+    () =>
+      network === "mainnet"
+        ? resolveMainnetRpcEndpoint()
+        : network === "localnet"
+          ? LOCALNET_ENDPOINT
+          : resolveDevnetRpcEndpoint(),
     [network]
   );
   const wsEndpoint = useMemo(
-    () => (network === "mainnet" ? MAINNET_WS_ENDPOINT : DEVNET_WS_ENDPOINT),
+    () =>
+      network === "mainnet"
+        ? MAINNET_WS_ENDPOINT
+        : network === "localnet"
+          ? LOCALNET_WS_ENDPOINT
+          : DEVNET_WS_ENDPOINT,
     [network]
   );
   const displayEndpoint = useMemo(
-    () => (network === "mainnet" ? MAINNET_DISPLAY_ENDPOINT : DEVNET_ENDPOINT),
+    () =>
+      network === "mainnet"
+        ? MAINNET_DISPLAY_ENDPOINT
+        : network === "localnet"
+          ? LOCALNET_ENDPOINT
+          : DEVNET_ENDPOINT,
     [network]
   );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     const stored = window.localStorage.getItem(NETWORK_STORAGE_KEY);
-    if (stored === "mainnet" || stored === "devnet") {
+    if (stored === "mainnet" || stored === "devnet" || stored === "localnet") {
       const frame = window.requestAnimationFrame(() => setNetwork(stored));
       return () => window.cancelAnimationFrame(frame);
     }

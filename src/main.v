@@ -208,11 +208,11 @@ pub start_round(
 }
 
 pub hit(
+    table: BlackjackTable,
     player: PlayerState @mut,
     round: RoundState @mut,
-    owner: account @signer
+    caller: account @session
 ) {
-    require(player.owner == owner.ctx.key);
     require(player.in_round);
     require(player.round_status == round_active());
     require(!round.player_stand);
@@ -235,6 +235,54 @@ pub hit(
         player.outcome = round_dealer_win();
         player.chips = player.chips - player.active_bet;
         player.in_round = false;
+        player.active_bet = 0;
+    } else if player.hand_total == 21 {
+        round.player_stand = true;
+
+        let mut dealer_total = player.dealer_total;
+        let mut dealer_soft_aces = round.dealer_soft_aces;
+        let mut dealer_cursor = round.draw_cursor;
+        let mut dealer_guard = 0;
+
+        while (dealer_should_draw(dealer_total, dealer_soft_aces, table.dealer_soft17_hits) && dealer_guard < 8) {
+            let dealer_rank = card_rank(round.deck_seed, dealer_cursor, round.owner_marker);
+            let dealer_value = card_value(dealer_rank);
+            dealer_total = dealer_total + dealer_value;
+            if dealer_rank == 1 {
+                dealer_soft_aces = dealer_soft_aces + 1;
+            }
+            while (dealer_total > 21 && dealer_soft_aces > 0) {
+                dealer_total = dealer_total - 10;
+                dealer_soft_aces = dealer_soft_aces - 1;
+            }
+            dealer_cursor = dealer_cursor + 1;
+            dealer_guard = dealer_guard + 1;
+            round.dealer_card_count = round.dealer_card_count + 1;
+        }
+
+        round.dealer_soft_aces = dealer_soft_aces;
+        round.draw_cursor = dealer_cursor;
+        player.dealer_total = dealer_total;
+
+        if dealer_total > 21 {
+            player.round_status = round_dealer_bust();
+            player.outcome = round_player_win();
+            player.chips = player.chips + player.active_bet;
+        } else if player.hand_total > dealer_total {
+            player.round_status = round_player_win();
+            player.outcome = round_player_win();
+            player.chips = player.chips + player.active_bet;
+        } else if player.hand_total < dealer_total {
+            player.round_status = round_dealer_win();
+            player.outcome = round_dealer_win();
+            player.chips = player.chips - player.active_bet;
+        } else {
+            player.round_status = round_push();
+            player.outcome = round_push();
+        }
+
+        player.in_round = false;
+        player.active_bet = 0;
     }
 
     player.session_nonce = player.session_nonce + 1;
@@ -244,9 +292,8 @@ pub stand_and_settle(
     table: BlackjackTable,
     player: PlayerState @mut,
     round: RoundState @mut,
-    owner: account @signer
+    caller: account @session
 ) {
-    require(player.owner == owner.ctx.key);
     require(player.in_round);
     require(player.round_status == round_active());
 
