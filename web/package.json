@@ -3,17 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --webpack",
+    "dev": "next dev --webpack --hostname 127.0.0.1 --port 3000",
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
+    "test:unit": "tsx --test src/lib/**/*.test.ts",
     "deploy:pages": "npx wrangler pages deploy out --project-name 5iveblackjack",
     "sync:artifact": "node scripts/sync-artifact.mjs",
     "predev": "npm run sync:artifact",
     "prebuild": "npm run sync:artifact"
   },
   "dependencies": {
-    "@5ive-tech/sdk": "^1.1.22",
+    "@5ive-tech/sdk": "^1.1.23",
     "@solana/wallet-adapter-base": "^0.9.27",
     "@solana/wallet-adapter-react": "^0.15.39",
     "@solana/wallet-adapter-react-ui": "^0.9.39",
@@ -37,6 +38,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4",
+    "tsx": "^4.20.6",
     "typescript": "^5",
     "wrangler": "^3.114.0"
   }

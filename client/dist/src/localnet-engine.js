@@ -148,9 +148,10 @@ export class LocalnetBlackjackEngine {
         const artifactText = await readFile(artifactPath, 'utf8');
         const loaded = await FiveSDK.loadFiveFile(artifactText);
         const rpcUrl = process.env.FIVE_RPC_URL || 'http://127.0.0.1:8899';
-        const fiveVmProgramId = process.env.FIVE_VM_PROGRAM_ID || '5ive5hbC3aRsvq37MP5m4sHtTSFxT4Cq1smS4ddyWJ6h';
+        const fiveVmProgramId = process.env.FIVE_VM_PROGRAM_ID || '55555SyrYLzydvDMBhAL8uo6h4WETHTm81z8btf6nAVJ';
         const connection = new Connection(rpcUrl, 'confirmed');
         const payer = await loadDefaultPayerKeypair();
+        const feeShardIndex = Number(process.env.FIVE_FEE_SHARD_INDEX || '0');
         await connection.getLatestBlockhash('confirmed');
         const vmProgramPk = new PublicKey(fiveVmProgramId);
         const vmProgramInfo = await connection.getAccountInfo(vmProgramPk, 'confirmed');
@@ -164,6 +165,7 @@ export class LocalnetBlackjackEngine {
             : await deployScriptWithFallback(connection, payer, loaded, fiveVmProgramId);
         const program = FiveProgram.fromABI(deploy.scriptAccount, loaded.abi, {
             fiveVMProgramId: fiveVmProgramId,
+            feeShardIndex,
         });
         const tableAccount = Keypair.generate();
         const playerAccount = Keypair.generate();
@@ -280,18 +282,25 @@ export class LocalnetBlackjackEngine {
             return { table: base.table, player: base.player, round: base.round, owner: base.owner };
         }
         if (functionName === 'hit') {
-            return {
-                player: base.player,
-                round: base.round,
-                owner: base.owner,
-            };
-        }
-        if (functionName === 'stand_and_settle') {
+            const caller = this.useDelegatedSession
+                ? this.delegate.publicKey.toBase58()
+                : base.owner;
             return {
                 table: base.table,
                 player: base.player,
                 round: base.round,
-                owner: base.owner,
+                caller,
+            };
+        }
+        if (functionName === 'stand_and_settle') {
+            const caller = this.useDelegatedSession
+                ? this.delegate.publicKey.toBase58()
+                : base.owner;
+            return {
+                table: base.table,
+                player: base.player,
+                round: base.round,
+                caller,
             };
         }
         if (functionName === 'get_player_chips')
@@ -305,9 +314,12 @@ export class LocalnetBlackjackEngine {
     builderFor(functionName, args = {}, walletPubkey) {
         const sessionized = this.useDelegatedSession && (functionName === 'hit' || functionName === 'stand_and_settle');
         const activeProgram = sessionized ? this.sessionProgram : this.program;
+        const caller = sessionized
+            ? this.delegate.publicKey.toBase58()
+            : this.payer.publicKey.toBase58();
         let builder = activeProgram
             .function(functionName)
-            .payer(walletPubkey || this.payer.publicKey.toBase58())
+            .payer(walletPubkey || caller)
             .accounts(this.accountsFor(functionName));
         if (Object.keys(args).length > 0) {
             builder = builder.args(args);
@@ -365,7 +377,9 @@ export class LocalnetBlackjackEngine {
         }
         const builder = this.builderFor(functionName, args);
         const ix = await builder.instruction();
-        return sendEncodedInstruction(this.connection, this.payer, ix, extraSigners, functionName);
+        const sender = sessionized ? this.delegate : this.payer;
+        const signers = sessionized ? [] : extraSigners;
+        return sendEncodedInstruction(this.connection, sender, ix, signers, functionName);
     }
     async buildUnsignedTx(functionName, _role, args, walletPubkey) {
         const builder = this.builderFor(functionName, args, walletPubkey);
@@ -563,14 +577,16 @@ export class LocalnetBlackjackEngine {
         return step;
     }
     async hit() {
-        const step = await this.call('hit', {}, [this.owner]);
+        const signers = this.useDelegatedSession ? [] : [this.owner];
+        const step = await this.call('hit', {}, signers);
         if (!step.ok)
             return step;
         this.applyHitLocal();
         return step;
     }
     async stand() {
-        const step = await this.call('stand_and_settle', {}, [this.owner]);
+        const signers = this.useDelegatedSession ? [] : [this.owner];
+        const step = await this.call('stand_and_settle', {}, signers);
         if (!step.ok)
             return step;
         this.applyStandLocal();

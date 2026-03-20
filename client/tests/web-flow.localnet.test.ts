@@ -8,17 +8,16 @@ import {
   Connection,
   Keypair,
   PublicKey,
-  SystemProgram,
   Transaction,
   TransactionInstruction,
   type ConfirmOptions,
 } from "@solana/web3.js";
-import { FiveProgram, FiveSDK } from "@5ive-tech/sdk";
+import { FiveProgram, FiveSDK, SessionClient, scopeHashForFunctions } from "@5ive-tech/sdk";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..", "..", "..");
 const rpcUrl = process.env.FIVE_RPC_URL || "http://127.0.0.1:8899";
-const vmProgramId = process.env.FIVE_VM_PROGRAM_ID || "5ive5hbC3aRsvq37MP5m4sHtTSFxT4Cq1smS4ddyWJ6h";
+const vmProgramId = process.env.FIVE_VM_PROGRAM_ID || "55555SyrYLzydvDMBhAL8uo6h4WETHTm81z8btf6nAVJ";
 const scriptAccount = process.env.FIVE_SCRIPT_ACCOUNT || "";
 const keypairPath = process.env.SOLANA_KEYPAIR_PATH || join(process.env.HOME || "", ".config/solana/id.json");
 
@@ -69,26 +68,7 @@ async function sendTx(connection: Connection, payer: Keypair, tx: Transaction, s
   return sig;
 }
 
-
-function scopeHashForFunctions(functions: string[]): string {
-  const sorted = [...functions].sort();
-  let acc = 0n;
-  const mask = (1n << 64n) - 1n;
-  for (const ch of sorted.join("|")) {
-    acc = (acc * 131n + BigInt(ch.charCodeAt(0))) & mask;
-  }
-  return acc.toString();
-}
-
 const SESSION_SCOPE_HASH = scopeHashForFunctions(["hit", "stand_and_settle"]);
-
-function canonicalSessionManagerScriptAccount(vmProgramId: string): string {
-  const [scriptPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("session_v1", "utf-8")],
-    new PublicKey(vmProgramId)
-  );
-  return scriptPda.toBase58();
-}
 
 async function ensureSessionManagerDeployment(
   connection: Connection,
@@ -117,13 +97,6 @@ async function ensureSessionManagerDeployment(
   assert.equal(result.success, true, `session manager deploy failed: ${result.error || ""}`);
 }
 
-async function loadSessionManagerAbi() {
-  const templateArtifact = join(projectRoot, "..", "five-templates", "session-manager", "build", "five-session-manager-template.five");
-  const artifact = await readFile(templateArtifact, "utf8");
-  const loaded = await FiveSDK.loadFiveFile(artifact);
-  return loaded.abi;
-}
-
 test("web flow on localnet using five-sdk", async () => {
   assert.ok(scriptAccount, "Set FIVE_SCRIPT_ACCOUNT to the deployed blackjack script account");
 
@@ -139,20 +112,33 @@ test("web flow on localnet using five-sdk", async () => {
   const table = Keypair.generate();
   const player = Keypair.generate();
   const round = Keypair.generate();
-  const session = Keypair.generate();
   const delegate = Keypair.generate();
   const managerScriptAccount =
     process.env.FIVE_SESSION_MANAGER_SCRIPT_ACCOUNT ||
-    canonicalSessionManagerScriptAccount(vmProgramId);
+    SessionClient.canonicalManagerScriptAccount(vmProgramId);
   await ensureSessionManagerDeployment(connection, payer, vmProgramId, managerScriptAccount);
-  const managerProgram = FiveProgram.fromABI(managerScriptAccount, (await loadSessionManagerAbi()) as any, {
-    fiveVMProgramId: vmProgramId,
+  const sessionClient = new SessionClient({
+    vmProgramId,
+    managerScriptAccount,
   });
-  const ownerProgram = new PublicKey(vmProgramId);
-  const space = 256;
-  const lamports = await connection.getMinimumBalanceForRentExemption(space);
-
   const owner = payer.publicKey.toBase58();
+  const sessionAddress = await sessionClient.deriveSessionAddress(
+    owner,
+    delegate.publicKey.toBase58(),
+    scriptAccount
+  );
+  const sessionProgram = program.withSession({
+    mode: "auto",
+    manager: { defaultTtlSlots: 3000 } as any,
+    sessionAccountByFunction: {
+      hit: sessionAddress,
+      stand_and_settle: sessionAddress,
+    },
+    delegateSignerByFunction: {
+      hit: delegate,
+      stand_and_settle: delegate,
+    },
+  });
   const baseAccounts = {
     table: table.publicKey.toBase58(),
     player: player.publicKey.toBase58(),
@@ -160,8 +146,7 @@ test("web flow on localnet using five-sdk", async () => {
     owner,
     authority: owner,
     delegate: delegate.publicKey.toBase58(),
-    session: session.publicKey.toBase58(),
-    __session: session.publicKey.toBase58(),
+    session: sessionAddress,
   };
   const vmSentinelSession = vmProgramId;
 
@@ -193,82 +178,62 @@ test("web flow on localnet using five-sdk", async () => {
   // First deal setup should be 2 tx max:
   // tx1 combines provision + init_table + init_player
   // tx2 does start_round
-  const setupTx1 = new Transaction().add(
-    SystemProgram.createAccount({
-      fromPubkey: payer.publicKey,
-      newAccountPubkey: table.publicKey,
-      lamports,
-      space,
-      programId: ownerProgram,
-    }),
-    SystemProgram.createAccount({
-      fromPubkey: payer.publicKey,
-      newAccountPubkey: player.publicKey,
-      lamports,
-      space,
-      programId: ownerProgram,
-    }),
-    SystemProgram.createAccount({
-      fromPubkey: payer.publicKey,
-      newAccountPubkey: round.publicKey,
-      lamports,
-      space,
-      programId: ownerProgram,
-    }),
-    SystemProgram.createAccount({
-      fromPubkey: payer.publicKey,
-      newAccountPubkey: session.publicKey,
-      lamports,
-      space,
-      programId: ownerProgram,
-    }),
-    initTableIx,
-    initPlayerIx
-  );
-  await sendTx(connection, payer, setupTx1, [table, player, round, session]);
+  const setupTx1 = new Transaction().add(initTableIx, initPlayerIx);
+  await sendTx(connection, payer, setupTx1, [table, player]);
 
   const slot = await connection.getSlot("confirmed");
-  const createSessionIx = decodeIx(
-    await managerProgram
-      .function("create_session")
-      .payer(owner)
-      .accounts({ session: baseAccounts.session, authority: owner, delegate: baseAccounts.delegate })
-      .args({
-        target_program: scriptAccount,
-        expires_at_slot: slot + 3000,
-        scope_hash: SESSION_SCOPE_HASH,
-        bind_account: baseAccounts.player,
-        nonce: 0,
-      })
-      .instruction()
+  const sessionPlan = await sessionClient.buildCreateSessionPlan(
+    {
+      authority: owner,
+      delegate: baseAccounts.delegate,
+      targetProgram: scriptAccount,
+      expiresAtSlot: slot + 3000,
+      scopeHash: SESSION_SCOPE_HASH,
+      bindAccount: baseAccounts.player,
+      nonce: 0,
+    },
+    {
+      connection,
+      payer: payer.publicKey,
+      delegateMinLamports: 500_000,
+      delegateTopupLamports: 2_000_000,
+    }
   );
-  await sendTx(connection, payer, new Transaction().add(createSessionIx));
-  await sendTx(connection, payer, new Transaction().add(startIx));
+  const createSessionTx = new Transaction();
+  if (sessionPlan.createSessionAccountIx) createSessionTx.add(sessionPlan.createSessionAccountIx);
+  if (sessionPlan.topupDelegateIx) createSessionTx.add(sessionPlan.topupDelegateIx);
+  createSessionTx.add(sessionPlan.createSessionIx);
+  await sendTx(connection, payer, createSessionTx);
+  await sendTx(connection, payer, new Transaction().add(startIx), [round]);
 
   const hitIx = decodeIx(
-    await program
+    await sessionProgram
       .function("hit")
-      .payer(owner)
-      .accounts({ __session: baseAccounts.__session, player: baseAccounts.player, round: baseAccounts.round, owner: baseAccounts.delegate })
-      .instruction()
-  );
-  await sendTx(connection, payer, new Transaction().add(hitIx), [delegate]);
-
-  const standIx = decodeIx(
-    await program
-      .function("stand_and_settle")
-      .payer(owner)
+      .payer(baseAccounts.delegate)
       .accounts({
-        __session: baseAccounts.__session,
         table: baseAccounts.table,
         player: baseAccounts.player,
         round: baseAccounts.round,
-        owner: baseAccounts.delegate,
+        caller: baseAccounts.delegate,
+      })
+      .instruction()
+  );
+  await sendTx(connection, delegate, new Transaction().add(hitIx));
+
+  const standIx = decodeIx(
+    await sessionProgram
+      .function("stand_and_settle")
+      .payer(baseAccounts.delegate)
+      .accounts({
+        table: baseAccounts.table,
+        player: baseAccounts.player,
+        round: baseAccounts.round,
+        caller: baseAccounts.delegate,
       })
       .instruction()
   );
   try {
-    await sendTx(connection, payer, new Transaction().add(standIx), [delegate]);
+    await sendTx(connection, delegate, new Transaction().add(standIx));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // If hit already ended the round (e.g., bust), stand can be invalid; that's acceptable in this smoke test.

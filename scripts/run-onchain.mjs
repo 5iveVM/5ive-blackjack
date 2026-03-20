@@ -28,12 +28,5 @@ if (network === 'devnet') {
   process.exit(0);
 }
 
-if (process.env.ALLOW_MAINNET_TESTS !== '1') {
-  console.error(
-    'Mainnet test run blocked. Set ALLOW_MAINNET_TESTS=1 to permit live mainnet transactions.\n' +
-    'For non-submitting validation, use: npm run test:onchain:mainnet:preflight'
-  );
-  process.exit(1);
-}
-
-run('npm', ['run', 'client:run:mainnet']);
+console.error('Mainnet on-chain test flow is disabled for this project.');
+process.exit(1);

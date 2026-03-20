@@ -1,8 +1,8 @@
 {
   "network": "localnet",
   "rpcUrl": "http://127.0.0.1:8899",
-  "fiveProgramId": "5ive5hbC3aRsvq37MP5m4sHtTSFxT4Cq1smS4ddyWJ6h",
-  "vmStatePda": "D2TzCqmXBrVJGkWRTGrzCDp1KaMBPwEXgCRfQRquLJgi",
-  "blackjackScriptAccount": "AP1LjuuUc2roKqLhVGYX8HsqanT3xthupuynakhJ3wGs",
-  "updatedAt": "2026-03-19T03:42:00Z"
+  "fiveProgramId": "55555SyrYLzydvDMBhAL8uo6h4WETHTm81z8btf6nAVJ",
+  "vmStatePda": "7utm673i6SYNBkBsjpD4fBo9oXP6U5AkvVHrSwBrAPMf",
+  "blackjackScriptAccount": "2djGLnRyWK6SDbanaTyDWKSX2H9Pai6fPUubtiqNC1Wz",
+  "updatedAt": "2026-03-20T10:27:45-04:00"
 }

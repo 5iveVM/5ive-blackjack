@@ -5,8 +5,8 @@
     "/Users/ivmidable/Development/five-mono/5ive-blackjack/src/main.v"
   ],
   "target": "vm",
-  "timestamp": "2026-03-19T05:07:16.837Z",
-  "hash": "cac5527813b443855487b325bb2d4e6c83b746a0fed01765108c67f43e1538f9",
+  "timestamp": "2026-03-20T15:43:31.564Z",
+  "hash": "cb49164feb9ca0299088014cf82a5b0013a7f73b4262aebb99c1d7f5a1be98d4",
   "format": "five",
   "entry_point": "src/main.v",
   "source_dir": "src"

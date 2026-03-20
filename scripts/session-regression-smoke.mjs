@@ -12,7 +12,7 @@ import {
 } from '../../five-cli/node_modules/@solana/web3.js/lib/index.cjs.js';
 import { FiveProgram, FiveSDK } from '../../five-sdk/dist/index.js';
 
-const DEFAULT_VM_PROGRAM_ID = '5ive5hbC3aRsvq37MP5m4sHtTSFxT4Cq1smS4ddyWJ6h';
+const DEFAULT_VM_PROGRAM_ID = '55555SyrYLzydvDMBhAL8uo6h4WETHTm81z8btf6nAVJ';
 const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 const SESSION_SCOPE_HASH = scopeHashForFunctions(['hit', 'stand_and_settle']);
 
@@ -194,10 +194,10 @@ async function runMode({
     steps: [],
   };
 
-  const runCall = async (fnName, args, accounts, extraSigners = []) => {
+  const runCall = async (fnName, args, accounts, extraSigners = [], payerOverride = owner) => {
     const encoded = await program
       .function(fnName)
-      .payer(owner)
+      .payer(payerOverride)
       .accounts(accounts)
       .args(args || {})
       .instruction();
@@ -221,7 +221,7 @@ async function runMode({
     owner,
   });
 
-  let hitOwner = owner;
+  let caller = owner;
   let sessionAccount = vmProgramId;
   let hitSigners = [];
 
@@ -275,7 +275,7 @@ async function runMode({
       .instruction();
     summary.steps.push(await sendNamedIx(connection, payer, 'create_session', createSessionIx));
 
-    hitOwner = delegate.publicKey.toBase58();
+    caller = delegate.publicKey.toBase58();
     sessionAccount = session.publicKey.toBase58();
     hitSigners = [delegate];
     summary.delegate = delegate.publicKey.toBase58();
@@ -286,12 +286,14 @@ async function runMode({
     'hit',
     {},
     {
+      table: setup.table.publicKey.toBase58(),
       player: setup.player.publicKey.toBase58(),
       round: setup.round.publicKey.toBase58(),
-      owner: hitOwner,
+      caller,
       __session: sessionAccount,
     },
-    hitSigners
+    hitSigners,
+    caller
   );
 
   if (includeStand) {
@@ -302,10 +304,11 @@ async function runMode({
         table: setup.table.publicKey.toBase58(),
         player: setup.player.publicKey.toBase58(),
         round: setup.round.publicKey.toBase58(),
-        owner: hitOwner,
+        caller,
         __session: sessionAccount,
       },
-      hitSigners
+      hitSigners,
+      caller
     );
   }
 
