@@ -35,3 +35,9 @@ Thumbs.db
 client/dist/
 *.v.debug
 .reports/
+target/
+dist/
+.env.*.local
+CLAUDE.md
+GEMINI.md
+AGENTS.md
